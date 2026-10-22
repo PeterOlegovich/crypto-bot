@@ -375,11 +375,27 @@ async def checker_loop():
         except Exception: log.exception("checker_loop failed")
         await asyncio.sleep(CHECK_INTERVAL)
 
+# --- Импортируем библиотеку для мини-сайта (пишем прямо здесь) ---
+from aiohttp import web
+
+async def handle_ping(request):
+    return web.Response(text="Bot is alive!")
+
+async def start_dummy_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    log.info("Dummy web server started on port 8080")
+
 async def main():
     await init_db()
-    task = asyncio.create_task(checker_loop())
+    asyncio.create_task(checker_loop())
+    asyncio.create_task(start_dummy_server())  # Запускаем мини-сайт
     try: await dp.start_polling(bot)
-    finally: task.cancel(); await close_client(); await bot.session.close()
+    finally: await close_client(); await bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
