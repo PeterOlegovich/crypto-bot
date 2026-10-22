@@ -24,7 +24,6 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
 dp = Dispatcher()
 DB_PATH = "alerts.db"
 
-BINANCE_FAPI = "https://fapi.binance.com"
 _client = None
 
 def get_client():
@@ -39,20 +38,82 @@ async def close_client():
         await _client.aclose()
         _client = None
 
+# --- ФУНКЦИИ С ПОДДЕРЖКОЙ ТРЕХ БИРЖ ---
+
 async def get_price(symbol: str) -> float:
-    r = await get_client().get(f"{BINANCE_FAPI}/fapi/v1/ticker/price", params={"symbol": symbol})
-    r.raise_for_status()
-    return float(r.json()["price"])
+    # 1. Пробуем Binance
+    try:
+        r = await get_client().get(f"https://fapi.binance.com/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=3)
+        if r.status_code == 200:
+            return float(r.json()["price"])
+    except Exception:
+        pass
+
+    # 2. Если Binance заблокирован, пробуем Bybit
+    try:
+        r = await get_client().get(f"https://api.bybit.com/v5/market/tickers", params={"category": "linear", "symbol": symbol}, timeout=3)
+        if r.status_code == 200:
+            data = r.json()["result"]["list"][0]
+            return float(data["lastPrice"])
+    except Exception:
+        pass
+
+    # 3. Если и Bybit не ответил, идем в OKX (там тикер пишется через дефис: BTC-USDT)
+    try:
+        okx_sym = symbol.replace("USDT", "-USDT")
+        r = await get_client().get(f"https://www.okx.com/api/v5/market/ticker", params={"instId": okx_sym}, timeout=3)
+        if r.status_code == 200:
+            data = r.json()["data"][0]
+            return float(data["last"])
+    except Exception:
+        pass
+
+    raise Exception("Все биржи недоступны или монета не найдена")
 
 async def get_funding(symbol: str) -> dict:
-    r = await get_client().get(f"{BINANCE_FAPI}/fapi/v1/premiumIndex", params={"symbol": symbol})
-    r.raise_for_status()
-    d = r.json()
-    return {
-        "mark": float(d["markPrice"]),
-        "funding_pct": float(d["lastFundingRate"]) * 100,
-        "next_funding_ms": int(d["nextFundingTime"]),
-    }
+    # 1. Binance
+    try:
+        r = await get_client().get(f"https://fapi.binance.com/fapi/v1/premiumIndex", params={"symbol": symbol}, timeout=3)
+        if r.status_code == 200:
+            d = r.json()
+            return {
+                "mark": float(d["markPrice"]),
+                "funding_pct": float(d["lastFundingRate"]) * 100,
+                "next_funding_ms": int(d["nextFundingTime"]),
+            }
+    except Exception:
+        pass
+
+    # 2. Bybit
+    try:
+        r = await get_client().get(f"https://api.bybit.com/v5/market/tickers", params={"category": "linear", "symbol": symbol}, timeout=3)
+        if r.status_code == 200:
+            data = r.json()["result"]["list"][0]
+            return {
+                "mark": float(data["markPrice"]),
+                "funding_pct": float(data["fundingRate"]) * 100,
+                "next_funding_ms": int(data["nextFundingTime"]),
+            }
+    except Exception:
+        pass
+
+    # 3. OKX
+    try:
+        okx_sym = symbol.replace("USDT", "-USDT")
+        r = await get_client().get(f"https://www.okx.com/api/v5/public/funding-rate", params={"instId": okx_sym}, timeout=3)
+        if r.status_code == 200:
+            data = r.json()["data"][0]
+            return {
+                "mark": float(data["markPx"]), 
+                "funding_pct": float(data["fundingRate"]) * 100,
+                "next_funding_ms": int(data["fundingTime"]),
+            }
+    except Exception:
+        pass
+
+    raise Exception("Не удалось получить данные о фандинге ни с одной биржи")
+
+# --- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ ---
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS alerts (
@@ -130,7 +191,6 @@ def check_op(value: float, op: str, threshold: float) -> bool:
 def fmt_ts(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-# --- Синие кнопки ---
 def get_inline_menu():
     kb = [
         [InlineKeyboardButton(text="🟡 BTC", callback_data="price_BTC"), InlineKeyboardButton(text="🔵 ETH", callback_data="price_ETH")],
@@ -142,11 +202,10 @@ def get_inline_menu():
 def get_back_menu():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]])
 
-# --- Старт ---
 @dp.message(Command("start"))
 async def cmd_start(m: Message):
     await m.answer(
-        "криптопенис эрегирует!\n\n"
+        "Крипто-помощник запущен!\n\n"
         "Доступные команды:\n"
         "/price ETH — цена\n"
         "/funding ETH — ставка за перенос\n"
@@ -174,7 +233,7 @@ async def callback_price(c: CallbackQuery):
 @dp.callback_query(F.data == "back")
 async def callback_back(c: CallbackQuery):
     await c.message.edit_text(
-        "криптопенис эрегирует!\n\n"
+        "криптопенис эрегирует!!\n\n"
         "Доступные команды:\n"
         "/price ETH — цена\n"
         "/funding ETH — ставка за перенос\n"
@@ -189,7 +248,6 @@ async def callback_back(c: CallbackQuery):
     )
     await c.answer()
 
-# --- Обычные команды ---
 @dp.message(Command("price"))
 async def cmd_price(m: Message):
     parts = m.text.split()
@@ -234,12 +292,10 @@ async def cmd_del(m: Message):
     await mark_triggered(int(parts[1]), m.from_user.id)
     await m.answer(f"Алерт #{parts[1]} удален")
 
-# --- Трекер и ИНСТРУКЦИЯ ---
 @dp.message(Command("track"))
 async def cmd_track(m: Message):
     parts = m.text.split()
     if len(parts) != 4:
-        # Если написать просто /track, бот выдаст подробную инструкцию
         return await m.answer(
             "📖 ИНСТРУКЦИЯ К ТРЕКЕРУ\n\n"
             "Формат команды:\n"
@@ -259,11 +315,9 @@ async def cmd_track(m: Message):
             "Посмотреть активные: /trackers\n"
             "Удалить: /deltrack <номер>"
         )
-    
     sym_raw, base_price_str, step = parts[1], parts[2], parts[3].lower()
     try: base_price = float(base_price_str)
     except: return await m.answer("Базовая цена должна быть числом")
-    
     sym = norm_symbol(sym_raw)
     tid = await add_tracker(m.from_user.id, sym, base_price, step)
     await m.answer(f"✅ Трекер #{tid} создан!\nСлежу за {sym} от {base_price}, шаг: {step}")
@@ -282,7 +336,6 @@ async def cmd_deltrack(m: Message):
     await del_tracker(int(parts[1]), m.from_user.id)
     await m.answer(f"Трекер #{parts[1]} удален")
 
-# --- Проверка в фоне ---
 async def checker_loop():
     log.info("Checker loop started")
     while True:
