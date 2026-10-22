@@ -205,7 +205,7 @@ def get_back_menu():
 @dp.message(Command("start"))
 async def cmd_start(m: Message):
     await m.answer(
-        "Крипто-помощник запущен!\n\n"
+        "криптопенис эрегирует!\n\n"
         "Доступные команды:\n"
         "/price ETH — цена\n"
         "/funding ETH — ставка за перенос\n"
