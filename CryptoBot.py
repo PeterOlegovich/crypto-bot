@@ -107,6 +107,7 @@ async def get_funding(symbol: str) -> dict:
     raise Exception("Не удалось получить данные о фандинге ни с одной биржи")
 
 async def get_long_short_ratio(symbol: str) -> str:
+    # 1. Bybit
     try:
         r = await get_client().get(f"https://api.bybit.com/v5/market/account-ratio", params={"category": "linear", "symbol": symbol, "period": "5min"}, timeout=3)
         if r.status_code == 200:
@@ -115,6 +116,8 @@ async def get_long_short_ratio(symbol: str) -> str:
             sell_ratio = float(data["sellRatio"]) * 100
             return f"Long/Short (Bybit): {buy_ratio:.1f}% лонгов / {sell_ratio:.1f}% шортов"
     except Exception: pass
+
+    # 2. Gate.io
     try:
         gate_sym = symbol.replace("USDT", "_USDT")
         r = await get_client().get(f"https://api.gateio.ws/api/v4/futures/usdt/contract_stats", params={"contract": gate_sym, "interval": "5m", "limit": 1}, timeout=3)
@@ -125,6 +128,21 @@ async def get_long_short_ratio(symbol: str) -> str:
             sell_ratio = 100 - buy_ratio
             return f"Long/Short (Gate.io): {buy_ratio:.1f}% лонгов / {sell_ratio:.1f}% шортов"
     except Exception: pass
+
+    # 3. OKX (с обходом блокировки через User-Agent)
+    try:
+        okx_sym = "TON-USDT" if symbol == "TONUSDT" else symbol.replace("USDT", "-USDT")
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        r = await get_client().get(f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio", params={"ccy": "BTC", "begin": "", "end": "", "period": "5m"}, headers=headers, timeout=3)
+        if r.status_code == 200:
+            data = r.json()["data"][0]
+            lsr = float(data[1])
+            if lsr > 0:
+                buy_ratio = (lsr / (1 + lsr)) * 100
+                sell_ratio = 100 - buy_ratio
+                return f"Long/Short (OKX): {buy_ratio:.1f}% лонгов / {sell_ratio:.1f}% шортов"
+    except Exception: pass
+
     return "Long/Short: данные недоступны"
 
 # --- БАЗА ДАННЫХ ---
