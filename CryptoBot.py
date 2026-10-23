@@ -33,6 +33,7 @@ dp = Dispatcher()
 DB_PATH = "alerts.db"
 
 _client = None
+ws_task = None  # Глобальная переменная для WebSocket
 
 def get_client():
     global _client
@@ -216,7 +217,7 @@ async def ws_stream_gate(symbol: str, chat_id: int):
                 "payload": [gate_sym]
             }
             await websocket.send(json.dumps(subscribe_msg))
-            await bot.send_message(chat_id, f"WebSocket подключен! Трансляция {symbol} (Gate.io) запущена. Чтобы остановить, перезапусти бота (/start).")
+            await bot.send_message(chat_id, f"🟢 WebSocket подключен! Трансляция {symbol} (Gate.io) запущена. Чтобы остановить: /stop_ws")
 
             while True:
                 response = await websocket.recv()
@@ -227,11 +228,13 @@ async def ws_stream_gate(symbol: str, chat_id: int):
                     price = float(result["last"])
                     funding = float(result["funding_rate"]) * 100
                     
-                    await bot.send_message(chat_id, f"{symbol}: Цена {price} | Фандинг: {funding:.4f}%")
+                    await bot.send_message(chat_id, f"📊 {symbol}: Цена {price} | Фандинг: {funding:.4f}%")
                     await asyncio.sleep(5)
                     
+    except asyncio.CancelledError:
+        await bot.send_message(chat_id, f"🔴 WebSocket для {symbol} остановлен.")
     except Exception as e:
-        await bot.send_message(chat_id, f"WebSocket отключился: {e}")
+        await bot.send_message(chat_id, f"❌ WebSocket отключился: {e}")
 
 # --- БАЗА ДАННЫХ ---
 SCHEMA = """
@@ -351,7 +354,7 @@ HELP_TEXT = (
     "/deltrack 1 — удалить трекер\n\n"
     "WebSocket (трансляция в реальном времени):\n"
     "/ws BTC — запустить живую трансляцию цены и фандинга\n"
-    "(Чтобы остановить, просто перезапусти бота или напиши /start)\n\n"
+    "/stop_ws — остановить трансляцию\n\n"
     "Узнать цену:"
 )
 
@@ -359,6 +362,10 @@ HELP_TEXT = (
 @dp.message(Command("start"))
 @dp.message(Command("help"))
 async def cmd_start(m: Message):
+    global ws_task
+    if ws_task and not ws_task.done():
+        ws_task.cancel()
+        ws_task = None
     await m.answer(HELP_TEXT, reply_markup=get_inline_menu())
 
 @dp.callback_query(F.data.startswith("price_"))
@@ -466,15 +473,26 @@ async def cmd_deltrack(m: Message):
 
 @dp.message(Command("ws"))
 async def cmd_ws(m: Message):
+    global ws_task
     parts = m.text.split()
     if len(parts) < 2: return await m.answer("Формат: /ws BTC")
     sym = norm_symbol(parts[1])
-    asyncio.create_task(ws_stream_gate(sym, m.chat.id))
+    
+    if ws_task and not ws_task.done():
+        ws_task.cancel()
+        
+    ws_task = asyncio.create_task(ws_stream_gate(sym, m.chat.id))
     await m.answer(f"Запускаю WebSocket для {sym}...")
 
 @dp.message(Command("stop_ws"))
 async def cmd_stop_ws(m: Message):
-    await m.answer("Чтобы остановить трансляцию, просто перезапусти бота в Render (или напиши /start).")
+    global ws_task
+    if ws_task and not ws_task.done():
+        ws_task.cancel()
+        ws_task = None
+        await m.answer("Трансляция остановлена.")
+    else:
+        await m.answer("Активных WebSocket-трансляций нет.")
 
 # --- ФОНОВЫЙ ЦИКЛ ---
 async def checker_loop():
