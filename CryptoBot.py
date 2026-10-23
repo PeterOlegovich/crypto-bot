@@ -246,8 +246,9 @@ def back_menu():
 
 def scan_menu():
     kb = [
-        [InlineKeyboardButton(text="5%", callback_data="scan_5"), InlineKeyboardButton(text="10%", callback_data="scan_10")],
-        [InlineKeyboardButton(text="15%", callback_data="scan_15"), InlineKeyboardButton(text="20%", callback_data="scan_20")],
+        [InlineKeyboardButton(text="2%", callback_data="scan_2"), InlineKeyboardButton(text="3%", callback_data="scan_3"), InlineKeyboardButton(text="5%", callback_data="scan_5")],
+        [InlineKeyboardButton(text="7%", callback_data="scan_7"), InlineKeyboardButton(text="10%", callback_data="scan_10"), InlineKeyboardButton(text="15%", callback_data="scan_15")],
+        [InlineKeyboardButton(text="20%", callback_data="scan_20"), InlineKeyboardButton(text="30%", callback_data="scan_30"), InlineKeyboardButton(text="50%", callback_data="scan_50")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
