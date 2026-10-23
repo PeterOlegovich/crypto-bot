@@ -43,7 +43,7 @@ async def close_client():
         await _client.aclose()
         _client = None
 
-# --- ФУНКЦИИ С ПОДДЕРЖКОЙ ЧЕТЫРЕХ БИРЖ ---
+# --- ФУНКЦИИ С ПОДДЕРЖКОЙ БИРЖ ---
 
 async def get_price(symbol: str) -> float:
     try:
@@ -64,26 +64,26 @@ async def get_price(symbol: str) -> float:
         r = await get_client().get(f"https://api.mexc.com/api/v3/ticker/price", params={"symbol": mexc_sym}, timeout=3)
         if r.status_code == 200: return float(r.json()["price"])
     except Exception: pass
+    try:
+        gate_sym = symbol.replace("USDT", "_USDT")
+        r = await get_client().get(f"https://api.gateio.ws/api/v4/futures/usdt/tickers", params={"contract": gate_sym}, timeout=3)
+        if r.status_code == 200: return float(r.json()[0]["last"])
+    except Exception: pass
     raise Exception("Все биржи недоступны или монета не найдена")
 
 async def get_funding(symbol: str) -> dict:
-    # 1. Binance
     try:
         r = await get_client().get(f"https://fapi.binance.com/fapi/v1/premiumIndex", params={"symbol": symbol}, timeout=3)
         if r.status_code == 200:
             d = r.json()
             return {"mark": float(d["markPrice"]), "funding_pct": float(d["lastFundingRate"]) * 100, "next_funding_ms": int(d["nextFundingTime"])}
     except Exception: pass
-    
-    # 2. Bybit
     try:
         r = await get_client().get(f"https://api.bybit.com/v5/market/tickers", params={"category": "linear", "symbol": symbol}, timeout=3)
         if r.status_code == 200:
             data = r.json()["result"]["list"][0]
             return {"mark": float(data["markPrice"]), "funding_pct": float(data["fundingRate"]) * 100, "next_funding_ms": int(data["nextFundingTime"])}
     except Exception: pass
-    
-    # 3. OKX
     try:
         okx_sym = "TON-USDT" if symbol == "TONUSDT" else symbol.replace("USDT", "-USDT")
         r = await get_client().get(f"https://www.okx.com/api/v5/public/funding-rate", params={"instId": okx_sym}, timeout=3)
@@ -91,27 +91,39 @@ async def get_funding(symbol: str) -> dict:
             data = r.json()["data"][0]
             return {"mark": float(data["markPx"]), "funding_pct": float(data["fundingRate"]) * 100, "next_funding_ms": int(data["fundingTime"])}
     except Exception: pass
-
-    # 4. MEXC (если Binance и Bybit заблокированы, отдаем 0.0%)
+    try:
+        gate_sym = symbol.replace("USDT", "_USDT")
+        r = await get_client().get(f"https://api.gateio.ws/api/v4/futures/usdt/contracts/{gate_sym}", timeout=3)
+        if r.status_code == 200:
+            d = r.json()
+            return {"mark": float(d["mark_price"]), "funding_pct": float(d["funding_rate"]) * 100, "next_funding_ms": int(d["funding_next_apply"]) * 1000}
+    except Exception: pass
     try:
         mexc_sym = "GRAMUSDT" if symbol == "TONUSDT" else symbol
         r = await get_client().get(f"https://api.mexc.com/api/v3/ticker/price", params={"symbol": mexc_sym}, timeout=3)
         if r.status_code == 200: 
             return {"mark": float(r.json()["price"]), "funding_pct": 0.0, "next_funding_ms": 0}
     except Exception: pass
-    
     raise Exception("Не удалось получить данные о фандинге ни с одной биржи")
 
-# --- ПОЛУЧЕНИЕ LONG/SHORT RATIO (BYBIT) ---
 async def get_long_short_ratio(symbol: str) -> str:
     try:
-        # Bybit отдает соотношение лонг/шорт по тому же тикеру
         r = await get_client().get(f"https://api.bybit.com/v5/market/account-ratio", params={"category": "linear", "symbol": symbol, "period": "5min"}, timeout=3)
         if r.status_code == 200:
             data = r.json()["result"]["list"][0]
             buy_ratio = float(data["buyRatio"]) * 100
             sell_ratio = float(data["sellRatio"]) * 100
             return f"Long/Short (Bybit): {buy_ratio:.1f}% лонгов / {sell_ratio:.1f}% шортов"
+    except Exception: pass
+    try:
+        gate_sym = symbol.replace("USDT", "_USDT")
+        r = await get_client().get(f"https://api.gateio.ws/api/v4/futures/usdt/contract_stats", params={"contract": gate_sym, "interval": "5m", "limit": 1}, timeout=3)
+        if r.status_code == 200:
+            data = r.json()[0]
+            lsr = float(data["lsr"])
+            buy_ratio = (lsr / (1 + lsr)) * 100
+            sell_ratio = 100 - buy_ratio
+            return f"Long/Short (Gate.io): {buy_ratio:.1f}% лонгов / {sell_ratio:.1f}% шортов"
     except Exception: pass
     return "Long/Short: данные недоступны"
 
@@ -168,13 +180,11 @@ async def del_tracker(tr_id, user_id):
         await db.execute("DELETE FROM trackers WHERE id = ? AND user_id = ?", (tr_id, user_id))
         await db.commit()
 
-# --- СБРОС ID ---
 async def reset_db_ids():
     async with aiosqlite.connect(DB_PATH) as db:
         count_alerts = (await (await db.execute("SELECT COUNT(*) FROM alerts WHERE triggered = 0")).fetchone())[0]
         if count_alerts == 0:
             await db.execute("DELETE FROM sqlite_sequence WHERE name='alerts'")
-            
         count_trackers = (await (await db.execute("SELECT COUNT(*) FROM trackers")).fetchone())[0]
         if count_trackers == 0:
             await db.execute("DELETE FROM sqlite_sequence WHERE name='trackers'")
@@ -199,6 +209,7 @@ def check_op(value, op, threshold):
     return value > threshold if op == ">" else value < threshold
 
 def fmt_ts(ms):
+    if ms == 0: return "Неизвестно"
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 # --- КНОПКИ ---
@@ -216,11 +227,10 @@ def get_back_menu():
 HELP_TEXT = (
     "криптопенис эрегирует!\n\n"
     "Цены:\n"
-    "/price BTC — цена любой монеты\n"
-    "(Кнопки ниже показывают цены в 1 клик)\n\n"
+    "/price BTC — цена любой монеты\n\n"
     "Фандинг (ставка за перенос):\n"
     "/funding BTC — узнать фандинг и соотношение лонг/шорт\n"
-    "(Если фандинг положительный — лонги платят шортам. Если отрицательный — наоборот. Высокий фандинг = рынок перегрет)\n"
+    "(Если фандинг положительный — лонги платят шортам. Если отрицательный — наоборот.)\n"
     "(Если шортов 70%+ и фандинг отрицательный — это сигнал к возможному пампу (шорт-сквизу), толпа ставит на падение, но рынок может пойти вверх)\n\n"
     "Алерты (уведомления):\n"
     "/alert price BTC > 80000 — пришлет пуш, если цена пересечет уровень\n"
