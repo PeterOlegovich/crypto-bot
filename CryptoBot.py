@@ -21,7 +21,7 @@ if not BOT_TOKEN:
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 CHECK_INTERVAL = 10
-SCAN_INTERVAL = 300
+SCAN_INTERVAL = 60  # Сканер проверяет рынок каждую минуту (60 секунд)
 # ==========================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -321,7 +321,7 @@ async def cmd_scan(m: Message):
 async def callback_scan(c: CallbackQuery):
     threshold = float(c.data.split("_")[1])
     USER_SCANS[c.from_user.id] = threshold
-    await c.message.edit_text(f"Сканер запущен!\nЯ буду присылать тебе монеты, которые изменились на {threshold}% и более.\n(Проверяю каждые 5 минут)\n\nЧтобы остановить, напиши /stop_scan")
+    await c.message.edit_text(f"Сканер запущен!\nЯ буду присылать тебе монеты, которые изменились на {threshold}% и более.\n(Проверяю каждую минуту)\n\nЧтобы остановить, напиши /stop_scan")
     await c.answer()
 
 @dp.message(Command("stop_scan"))
