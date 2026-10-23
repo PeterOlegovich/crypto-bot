@@ -2,3 +2,4 @@ aiogram
 httpx
 aiosqlite
 aiohttp
+websockets
