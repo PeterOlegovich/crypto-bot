@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import random
-import time
 from datetime import datetime, timezone
 
 import aiosqlite
@@ -11,9 +10,6 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, TelegramObject, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.client.default import DefaultBotProperties
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 
 # ==========================================
@@ -31,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("bot")
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher()
 DB_PATH = "alerts.db"
 
 _client = None
@@ -220,17 +216,6 @@ async def reset_db_ids():
         if count_trackers == 0: await db.execute("DELETE FROM sqlite_sequence WHERE name='trackers'")
         await db.commit()
 
-# --- FSM СОСТОЯНИЯ ---
-class CreateTracker(StatesGroup):
-    symbol = State()
-    step = State()
-
-class CreateAlert(StatesGroup):
-    kind = State()
-    symbol = State()
-    op = State()
-    threshold = State()
-
 # --- ХЕЛПЕРЫ ---
 def norm_symbol(raw: str) -> str:
     s = raw.upper()
@@ -246,19 +231,41 @@ def fmt_ts(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 # --- КЛАВИАТУРЫ ---
-def main_menu():
+def price_menu():
     kb = [
-        [InlineKeyboardButton(text="Цена BTC", callback_data="price_BTC"), InlineKeyboardButton(text="Цена ETH", callback_data="price_ETH")],
-        [InlineKeyboardButton(text="Цена GRAM", callback_data="price_GRAM"), InlineKeyboardButton(text="Цена SOL", callback_data="price_SOL")],
-        [InlineKeyboardButton(text="Цена Золота", callback_data="price_GOLD")],
-        [InlineKeyboardButton(text="Создать Трекер", callback_data="create_tracker"), InlineKeyboardButton(text="Мои Трекеры", callback_data="my_trackers")],
-        [InlineKeyboardButton(text="Создать Алерт", callback_data="create_alert"), InlineKeyboardButton(text="Мои Алерты", callback_data="my_alerts")],
-        [InlineKeyboardButton(text="Фандинг BTC", callback_data="funding_BTC"), InlineKeyboardButton(text="Фандинг ETH", callback_data="funding_ETH")],
+        [InlineKeyboardButton(text="🟡 BTC", callback_data="price_BTC"), InlineKeyboardButton(text="🔵 ETH", callback_data="price_ETH")],
+        [InlineKeyboardButton(text="💎 GRAM", callback_data="price_GRAM"), InlineKeyboardButton(text="🟣 SOL", callback_data="price_SOL")],
+        [InlineKeyboardButton(text="🥇 Золото", callback_data="price_GOLD")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def back_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Назад в меню", callback_data="back_to_menu")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Назад", callback_data="back_to_help")]])
+
+HELP_TEXT = (
+    "криптопенис эрегирует!\n\n"
+    "Цены:\n"
+    "/price BTC — цена любой монеты\n\n"
+    "Фандинг (ставка за перенос):\n"
+    "/funding BTC — узнать фандинг и соотношение лонг/шорт\n"
+    "(Выводит данные сразу с нескольких бирж)\n"
+    "(Если фандинг положительный — лонги платят шортам. Если отрицательный — наоборот. Высокий фандинг = рынок перегрет)\n\n"
+    "Алерты (уведомления):\n"
+    "/alert price BTC > 80000 — пришлет пуш, если цена пересечет уровень\n"
+    "/alert funding BTC > 0.05 — пуш по фандингу\n"
+    "/alerts — список активных алертов\n"
+    "/del 1 — удалить алерт по номеру\n\n"
+    "Трекеры (следят за изменением):\n"
+    "/track BTC 81520 5% — следить за изменением на 5%\n"
+    "(Если не знаешь цену, пиши 0 вместо 81520, бот сам возьмет текущую)\n"
+    "Шаги: 10s (мин. слежка - каждые 10 сек), 1m (1 мин), 1h (1 час), 5% (5%), 100 (на 100)\n"
+    "/trackers — список трекеров\n"
+    "/deltrack 1 — удалить трекер\n\n"
+    "WebSocket (трансляция в реальном времени):\n"
+    "/ws BTC — запустить живую трансляцию цены и фандинга\n"
+    "/stop_ws — остановить трансляцию\n\n"
+    "Узнать цену:"
+)
 
 # --- МИДЛВАРЬ ДЛЯ ЮЗЕРОВ ---
 class UserMiddleware(BaseMiddleware):
@@ -273,8 +280,9 @@ dp.callback_query.middleware(UserMiddleware())
 
 # --- ХЭНДЛЕРЫ ---
 @dp.message(Command("start"))
+@dp.message(Command("help"))
 async def cmd_start(m: Message):
-    await m.answer("криптопенис эрегирует!\n\nВыбери действие в меню:", reply_markup=main_menu())
+    await m.answer(HELP_TEXT, reply_markup=price_menu())
 
 @dp.message(Command("admin"))
 async def cmd_admin(m: Message):
@@ -345,124 +353,86 @@ async def callback_price(c: CallbackQuery):
         await c.message.edit_text(f"Ошибка: {e}", reply_markup=back_menu())
     await c.answer()
 
-@dp.callback_query(F.data.startswith("funding_"))
-async def callback_funding(c: CallbackQuery):
-    sym_name = c.data.split("_")[1]
-    sym = "TONUSDT" if sym_name == "GRAM" else f"{sym_name}USDT"
+@dp.callback_query(F.data == "back_to_help")
+async def callback_back(c: CallbackQuery):
+    await c.message.edit_text(HELP_TEXT, reply_markup=price_menu())
+    await c.answer()
+
+@dp.message(Command("price"))
+async def cmd_price(m: Message):
+    parts = m.text.split()
+    if len(parts) < 2: return await m.answer("Формат: /price BTC", reply_markup=back_menu())
+    sym = norm_symbol(parts[1])
+    try: await m.answer(f"{sym}: {await get_price(sym)}", reply_markup=back_menu())
+    except Exception as e: await m.answer(f"Ошибка: {e}", reply_markup=back_menu())
+
+@dp.message(Command("funding"))
+async def cmd_funding(m: Message):
+    parts = m.text.split()
+    if len(parts) < 2: return await m.answer("Формат: /funding BTC", reply_markup=back_menu())
+    sym = norm_symbol(parts[1])
     try:
         f = await get_funding(sym)
         ratio = await get_long_short_ratio(sym)
         f_text = "Лонги платят шортам" if f['funding_pct'] > 0 else ("Шорты платят лонгам" if f['funding_pct'] < 0 else "Ставка 0")
-        await c.message.edit_text(
-            f"{sym}\nЦена: {f['mark']}\nФандинг: {f['funding_pct']:.4f}% ({f_text})\nВремя: {fmt_ts(f['next_funding_ms'])}\n\n{ratio}", 
-            reply_markup=back_menu()
-        )
-    except Exception as e:
-        await c.message.edit_text(f"Ошибка: {e}", reply_markup=back_menu())
-    await c.answer()
+        await m.answer(f"{sym}\nЦена: {f['mark']}\nФандинг: {f['funding_pct']:.4f}% ({f_text})\nВремя: {fmt_ts(f['next_funding_ms'])}\n\n{ratio}", reply_markup=back_menu())
+    except Exception as e: await m.answer(f"Ошибка: {e}", reply_markup=back_menu())
 
-@dp.callback_query(F.data == "back_to_menu")
-async def callback_back(c: CallbackQuery):
-    await c.message.edit_text("Выбери действие в меню:", reply_markup=main_menu())
-    await c.answer()
+@dp.message(Command("alert"))
+async def cmd_alert(m: Message):
+    parts = m.text.split()
+    if len(parts) != 5: return await m.answer("Формат: /alert price BTC > 3000", reply_markup=back_menu())
+    kind, sym_raw, op, val = parts[1].lower(), parts[2], parts[3], parts[4]
+    if kind not in ("price", "funding"): return await m.answer("kind: price или funding", reply_markup=back_menu())
+    if op not in (">", "<"): return await m.answer("op: > или <", reply_markup=back_menu())
+    try: threshold = float(val)
+    except ValueError: return await m.answer("value должно быть числом", reply_markup=back_menu())
+    sym = norm_symbol(sym_raw)
+    aid = await add_alert(m.from_user.id, kind, sym, op, threshold)
+    await m.answer(f"Алерт #{aid} создан: {kind} {sym} {op} {threshold}", reply_markup=back_menu())
 
-# --- FSM ТРЕКЕР ---
-@dp.callback_query(F.data == "create_tracker")
-async def cb_create_tracker(c: CallbackQuery, state: FSMContext):
-    await state.set_state(CreateTracker.symbol)
-    kb = [[InlineKeyboardButton(text="BTC", callback_data="tr_sym_BTC"), InlineKeyboardButton(text="ETH", callback_data="tr_sym_ETH"), InlineKeyboardButton(text="SOL", callback_data="tr_sym_SOL")]]
-    await c.message.edit_text("Выбери монету для трекера:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    await c.answer()
+@dp.message(Command("alerts"))
+async def cmd_alerts(m: Message):
+    rows = await get_active_alerts(m.from_user.id)
+    if not rows: return await m.answer("Активных алертов нет", reply_markup=back_menu())
+    await m.answer("\n".join([f"#{r['id']} {r['kind']} {r['symbol']} {r['op']} {r['threshold']}" for r in rows]), reply_markup=back_menu())
 
-@dp.callback_query(F.data.startswith("tr_sym_"), CreateTracker.symbol)
-async def tr_sym(c: CallbackQuery, state: FSMContext):
-    sym = c.data.split("_")[2]
-    await state.update_data(symbol=norm_symbol(sym))
-    await state.set_state(CreateTracker.step)
-    kb = [[InlineKeyboardButton(text="10 секунд", callback_data="tr_step_10s"), InlineKeyboardButton(text="1 минута", callback_data="tr_step_1m")],
-          [InlineKeyboardButton(text="1 час", callback_data="tr_step_1h"), InlineKeyboardButton(text="1%", callback_data="tr_step_1%")]]
-    await c.message.edit_text("Выбери шаг изменения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    await c.answer()
+@dp.message(Command("del"))
+async def cmd_del(m: Message):
+    parts = m.text.split()
+    if len(parts) != 2: return await m.answer("Формат: /del <id>", reply_markup=back_menu())
+    await mark_triggered(int(parts[1]), m.from_user.id)
+    await reset_db_ids()
+    await m.answer(f"Алерт #{parts[1]} удален", reply_markup=back_menu())
 
-@dp.callback_query(F.data.startswith("tr_step_"), CreateTracker.step)
-async def tr_step(c: CallbackQuery, state: FSMContext):
-    step = c.data.split("_")[2]
-    data = await state.get_data()
-    sym = data['symbol']
-    try:
-        curr_price = await get_price(sym)
-        tid = await add_tracker(c.from_user.id, sym, curr_price, step)
-        await c.message.edit_text(f"Трекер #{tid} создан!\nСлежу за {sym} от {curr_price}, шаг: {step}", reply_markup=back_menu())
-    except Exception as e:
-        await c.message.edit_text(f"Ошибка: {e}", reply_markup=back_menu())
-    await state.clear()
-    await c.answer()
+@dp.message(Command("track"))
+async def cmd_track(m: Message):
+    parts = m.text.split()
+    if len(parts) != 4: return await m.answer("Формат: /track BTC 81520 5% (если не знаешь цену, пиши 0)", reply_markup=back_menu())
+    sym_raw, base_price_str, step = parts[1], parts[2], parts[3].lower()
+    try: base_price = float(base_price_str)
+    except: return await m.answer("Базовая цена должна быть числом", reply_markup=back_menu())
+    sym = norm_symbol(sym_raw)
+    if base_price == 0:
+        try: base_price = await get_price(sym)
+        except Exception as e: return await m.answer(f"Ошибка получения цены: {e}", reply_markup=back_menu())
+    tid = await add_tracker(m.from_user.id, sym, base_price, step)
+    await m.answer(f"Трекер #{tid} создан!\nСлежу за {sym} от {base_price}, шаг: {step}", reply_markup=back_menu())
 
-# --- FSM АЛЕРТ ---
-@dp.callback_query(F.data == "create_alert")
-async def cb_create_alert(c: CallbackQuery, state: FSMContext):
-    await state.set_state(CreateAlert.kind)
-    kb = [[InlineKeyboardButton(text="По цене", callback_data="al_kind_price"), InlineKeyboardButton(text="По фандингу", callback_data="al_kind_funding")]]
-    await c.message.edit_text("Выбери тип алерта:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    await c.answer()
+@dp.message(Command("trackers"))
+async def cmd_trackers(m: Message):
+    rows = await get_trackers(m.from_user.id)
+    if not rows: return await m.answer("Нет активных трекеров", reply_markup=back_menu())
+    lines = [f"#{r['id']} {r['symbol']} от {r['base_price']}, шаг {r['step']}" for r in rows]
+    await m.answer("Твои трекеры:\n" + "\n".join(lines) + "\n\nУдалить: /deltrack <id>", reply_markup=back_menu())
 
-@dp.callback_query(F.data.startswith("al_kind_"), CreateAlert.kind)
-async def al_kind(c: CallbackQuery, state: FSMContext):
-    kind = c.data.split("_")[2]
-    await state.update_data(kind=kind)
-    await state.set_state(CreateAlert.symbol)
-    kb = [[InlineKeyboardButton(text="BTC", callback_data="al_sym_BTC"), InlineKeyboardButton(text="ETH", callback_data="al_sym_ETH"), InlineKeyboardButton(text="SOL", callback_data="al_sym_SOL")]]
-    await c.message.edit_text("Выбери монету:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    await c.answer()
-
-@dp.callback_query(F.data.startswith("al_sym_"), CreateAlert.symbol)
-async def al_sym(c: CallbackQuery, state: FSMContext):
-    sym = c.data.split("_")[2]
-    await state.update_data(symbol=norm_symbol(sym))
-    await state.set_state(CreateAlert.op)
-    kb = [[InlineKeyboardButton(text="Больше (>),", callback_data="al_op_>"), InlineKeyboardButton(text="Меньше (<)", callback_data="al_op_<")]]
-    await c.message.edit_text("Выбери условие:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    await c.answer()
-
-@dp.callback_query(F.data.startswith("al_op_"), CreateAlert.op)
-async def al_op(c: CallbackQuery, state: FSMContext):
-    op = c.data.split("_")[2]
-    await state.update_data(op=op)
-    await state.set_state(CreateAlert.threshold)
-    await c.message.edit_text(f"Напиши число (порог для {op}):", reply_markup=back_menu())
-    await c.answer()
-
-@dp.message(CreateAlert.threshold)
-async def al_threshold(m: Message, state: FSMContext):
-    try:
-        threshold = float(m.text)
-    except ValueError:
-        return await m.answer("Это не число. Попробуй еще раз:")
-    data = await state.get_data()
-    aid = await add_alert(m.from_user.id, data['kind'], data['symbol'], data['op'], threshold)
-    await m.answer(f"Алерт #{aid} создан: {data['kind']} {data['symbol']} {data['op']} {threshold}", reply_markup=back_menu())
-    await state.clear()
-
-# --- СПИСКИ ---
-@dp.callback_query(F.data == "my_trackers")
-async def cb_my_trackers(c: CallbackQuery):
-    rows = await get_trackers(c.from_user.id)
-    if not rows: 
-        await c.message.edit_text("У тебя нет активных трекеров.", reply_markup=back_menu())
-    else:
-        text = "Твои трекеры:\n" + "\n".join([f"#{r['id']} {r['symbol']} от {r['base_price']}, шаг {r['step']}" for r in rows])
-        await c.message.edit_text(text, reply_markup=back_menu())
-    await c.answer()
-
-@dp.callback_query(F.data == "my_alerts")
-async def cb_my_alerts(c: CallbackQuery):
-    rows = await get_active_alerts(c.from_user.id)
-    if not rows: 
-        await c.message.edit_text("У тебя нет активных алертов.", reply_markup=back_menu())
-    else:
-        text = "Твои алерты:\n" + "\n".join([f"#{r['id']} {r['kind']} {r['symbol']} {r['op']} {r['threshold']}" for r in rows])
-        await c.message.edit_text(text, reply_markup=back_menu())
-    await c.answer()
+@dp.message(Command("deltrack"))
+async def cmd_deltrack(m: Message):
+    parts = m.text.split()
+    if len(parts) != 2: return await m.answer("Формат: /deltrack <id>", reply_markup=back_menu())
+    await del_tracker(int(parts[1]), m.from_user.id)
+    await reset_db_ids()
+    await m.answer(f"Трекер #{parts[1]} удален", reply_markup=back_menu())
 
 # --- ФОНОВЫЙ ЦИКЛ ---
 async def checker_loop():
