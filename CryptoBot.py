@@ -327,14 +327,27 @@ async def callback_scan(c: CallbackQuery):
     await c.message.edit_text("Запускаю сканер... Запоминаю текущие цены.")
     
     try:
+        # Пытаемся взять с Bybit
         r = await get_client().get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=15)
         if r.status_code == 200:
             START_PRICES = {t["symbol"]: float(t["lastPrice"]) for t in r.json()["result"]["list"]}
-            await c.message.edit_text(f"Сканер запущен!\nЯ запомнил текущие цены всех монет.\nЕсли что-то изменится на {threshold}% от этих цен, я сразу пришлю.\n(Проверяю каждую минуту)\n\nЧтобы остановить, напиши /stop_scan")
         else:
-            await c.message.edit_text("Ошибка при получении цен от биржи. Попробуй позже.")
-    except Exception as e:
-        await c.message.edit_text(f"Ошибка: {e}")
+            raise Exception("Bybit отказал")
+
+        await c.message.edit_text(f"Сканер запущен (Bybit)!\nЯ запомнил текущие цены всех монет.\nЕсли что-то изменится на {threshold}% от этих цен, я сразу пришлю.\n(Проверяю каждую минуту)\n\nЧтобы остановить, напиши /stop_scan")
+    
+    except Exception:
+        # Если Bybit заблокировал, берем с Gate.io
+        try:
+            r = await get_client().get("https://api.gateio.ws/api/v4/futures/usdt/tickers", timeout=15)
+            if r.status_code == 200:
+                START_PRICES = {t["contract"].replace("_", ""): float(t["last"]) for t in r.json()}
+                await c.message.edit_text(f"Сканер запущен (Gate.io)!\nBybit заблокировал запрос, поэтому я взял данные с Gate.\nЕсли что-то изменится на {threshold}% от этих цен, я сразу пришлю.\n(Проверяю каждую минуту)\n\nЧтобы остановить, напиши /stop_scan")
+            else:
+                await c.message.edit_text("Все биржи отклонили запрос. Попробуй позже.")
+        except Exception as e:
+            await c.message.edit_text(f"Ошибка получения цен: {e}")
+            
     await c.answer()
 
 @dp.message(Command("stop_scan"))
@@ -547,38 +560,56 @@ async def pump_scanner_loop():
         await asyncio.sleep(SCAN_INTERVAL)
         if not USER_SCANS: continue
         
+        current_tickers = {}
+        source_name = ""
+        
         try:
+            # Пытаемся обновить с Bybit
             r = await get_client().get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=15)
             if r.status_code == 200:
                 current_tickers = {t["symbol"]: float(t["lastPrice"]) for t in r.json()["result"]["list"]}
-                
-                if not START_PRICES:
-                    START_PRICES = current_tickers
-                    continue
+                source_name = "Bybit"
+        except Exception:
+            pass
+            
+        if not current_tickers:
+            try:
+                # Если Bybit не ответил, берем с Gate.io
+                r = await get_client().get("https://api.gateio.ws/api/v4/futures/usdt/tickers", timeout=15)
+                if r.status_code == 200:
+                    current_tickers = {t["contract"].replace("_", ""): float(t["last"]) for t in r.json()}
+                    source_name = "Gate.io"
+            except Exception as e:
+                await log_error_to_db(f"Scanner failed to get prices: {e}")
 
-                for user_id, threshold in USER_SCANS.items():
-                    found_pumps = []
-                    for sym, current_price in current_tickers.items():
-                        if not sym.endswith("USDT"): continue
-                        if sym not in START_PRICES: continue
-                        
-                        start_price = START_PRICES[sym]
-                        if start_price == 0: continue
-                        
-                        change_pct = ((current_price - start_price) / start_price) * 100
-                        
-                        if abs(change_pct) >= threshold:
-                            direction = "выросла" if change_pct > 0 else "упала"
-                            found_pumps.append(f"{sym}: {direction} на {abs(change_pct):.1f}% (Старт: {start_price} -> Сейчас: {current_price}) [Bybit]")
-                    
-                    if found_pumps:
-                        text = f"Сканер (от момента запуска): Движения на {threshold}%+!\n\n" + "\n".join(found_pumps[:15])
-                        try:
-                            await bot.send_message(user_id, text)
-                            await asyncio.sleep(0.1)
-                        except Exception: pass
-        except Exception as e:
-            await log_error_to_db(f"Scanner failed: {e}")
+        if not current_tickers:
+            continue
+
+        if not START_PRICES:
+            START_PRICES = current_tickers
+            continue
+
+        for user_id, threshold in USER_SCANS.items():
+            found_pumps = []
+            for sym, current_price in current_tickers.items():
+                if not sym.endswith("USDT"): continue
+                if sym not in START_PRICES: continue
+                
+                start_price = START_PRICES[sym]
+                if start_price == 0: continue
+                
+                change_pct = ((current_price - start_price) / start_price) * 100
+                
+                if abs(change_pct) >= threshold:
+                    direction = "выросла" if change_pct > 0 else "упала"
+                    found_pumps.append(f"{sym}: {direction} на {abs(change_pct):.1f}% (Старт: {start_price} -> Сейчас: {current_price}) [{source_name}]")
+            
+            if found_pumps:
+                text = f"Сканер (от момента запуска): Движения на {threshold}%+!\n\n" + "\n".join(found_pumps[:15])
+                try:
+                    await bot.send_message(user_id, text)
+                    await asyncio.sleep(0.1)
+                except Exception: pass
 
 # --- ЗАПУСК ---
 async def handle_ping(request):
