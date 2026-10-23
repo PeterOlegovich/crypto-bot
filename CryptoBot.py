@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import random
+import json
+import websockets
 from datetime import datetime, timezone
 
 import aiosqlite
@@ -88,7 +90,6 @@ async def get_funding(symbol: str) -> dict:
     final_next_ms = 0
     found = False
 
-    # 1. Binance
     try:
         r = await get_client().get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}&t={rnd}", headers=get_headers(), timeout=3)
         if r.status_code == 200:
@@ -99,7 +100,6 @@ async def get_funding(symbol: str) -> dict:
                 found = True
     except Exception: pass
 
-    # 2. Bybit
     try:
         r = await get_client().get(f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}&t={rnd}", headers=get_headers(), timeout=3)
         if r.status_code == 200:
@@ -110,7 +110,6 @@ async def get_funding(symbol: str) -> dict:
                 found = True
     except Exception: pass
 
-    # 3. Gate.io
     try:
         gate_sym = symbol.replace("USDT", "_USDT")
         r = await get_client().get(f"https://api.gateio.ws/api/v4/futures/usdt/contracts/{gate_sym}?t={rnd}", headers=get_headers(), timeout=3)
@@ -122,7 +121,6 @@ async def get_funding(symbol: str) -> dict:
                 found = True
     except Exception: pass
 
-    # 4. OKX
     try:
         okx_sym = "TON-USDT" if symbol == "TONUSDT" else symbol.replace("USDT", "-USDT")
         r = await get_client().get(f"https://www.okx.com/api/v5/public/funding-rate?instId={okx_sym}&t={rnd}", headers=get_headers(), timeout=3)
@@ -134,7 +132,6 @@ async def get_funding(symbol: str) -> dict:
                 found = True
     except Exception: pass
 
-    # 5. MEXC (если остальные не отдали)
     try:
         mexc_sym = "GRAMUSDT" if symbol == "TONUSDT" else symbol
         r = await get_client().get(f"https://api.mexc.com/api/v3/ticker/price?symbol={mexc_sym}&t={rnd}", headers=get_headers(), timeout=3)
@@ -204,6 +201,37 @@ async def get_long_short_ratio(symbol: str) -> str:
     result = lsr_text
     if oi_text: result += f"\n{oi_text}"
     return result
+
+# --- WEBSOCKET ТРАНСЛЯЦИЯ ---
+async def ws_stream_gate(symbol: str, chat_id: int):
+    gate_sym = symbol.replace("USDT", "_USDT")
+    url = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+    
+    try:
+        async with websockets.connect(url) as websocket:
+            subscribe_msg = {
+                "time": int(datetime.now().timestamp()),
+                "channel": "futures.tickers",
+                "event": "subscribe",
+                "payload": [gate_sym]
+            }
+            await websocket.send(json.dumps(subscribe_msg))
+            await bot.send_message(chat_id, f"WebSocket подключен! Трансляция {symbol} (Gate.io) запущена. Чтобы остановить, перезапусти бота (/start).")
+
+            while True:
+                response = await websocket.recv()
+                data = json.loads(response)
+                
+                if data.get("event") == "update" and data.get("channel") == "futures.tickers":
+                    result = data["result"][0]
+                    price = float(result["last"])
+                    funding = float(result["funding_rate"]) * 100
+                    
+                    await bot.send_message(chat_id, f"{symbol}: Цена {price} | Фандинг: {funding:.4f}%")
+                    await asyncio.sleep(5)
+                    
+    except Exception as e:
+        await bot.send_message(chat_id, f"WebSocket отключился: {e}")
 
 # --- БАЗА ДАННЫХ ---
 SCHEMA = """
@@ -306,21 +334,21 @@ HELP_TEXT = (
     "криптопенис эрегирует!\n\n"
     "Цены:\n"
     "/price BTC — цена любой монеты\n\n"
-    "Фандинг (ставка за перенос):\n"
-    "/funding BTC — узнать фандинг и соотношение лонг/шорт\n"
-    "(Выводит данные сразу с нескольких бирж для сравнения)\n"
-    "(Если фандинг положительный — лонги платят шортам. Если отрицательный — наоборот.)\n\n"
-    "Алерты (уведомления):\n"
-    "/alert price BTC > 80000 — пришлет пуш, если цена пересечет уровень\n"
-    "/alert funding BTC > 0.05 — пуш по фандингу\n"
-    "/alerts — список активных алертов\n"
-    "/del 1 — удалить алерт по номеру\n\n"
-    "Трекеры (следят за изменением):\n"
-    "/track BTC 81520 5% — следить за изменением на 5%\n"
-    "(Если не знаешь цену, пиши 0 вместо 81520, бот сам возьмет текущую)\n"
-    "Шаги: 10s (мин. слежка - каждые 10 сек), 1m (1 мин), 1h (1 час), 5% (5%), 100 (на 100)\n"
-    "/trackers — список трекеров\n"
-    "/deltrack 1 — удалить трекер\n\n"
+    "Фандинг:\n"
+    "/funding BTC — фандинг и лонг/шорт\n\n"
+    "Алерты:\n"
+    "/alert price BTC > 80000\n"
+    "/alert funding BTC > 0.05\n"
+    "/alerts — список\n"
+    "/del 1 — удалить\n\n"
+    "Трекеры:\n"
+    "/track BTC 81520 5%\n"
+    "(если не знаешь цену, пиши 0)\n"
+    "Шаги: 10s, 1m, 1h, 5%, 100\n"
+    "/trackers — список\n"
+    "/deltrack 1 — удалить\n\n"
+    "WebSocket:\n"
+    "/ws BTC — включить трансляцию в реальном времени\n\n"
     "Узнать цену:"
 )
 
@@ -432,6 +460,18 @@ async def cmd_deltrack(m: Message):
     await del_tracker(int(parts[1]), m.from_user.id)
     await reset_db_ids()
     await m.answer(f"Трекер #{parts[1]} удален", reply_markup=get_back_menu())
+
+@dp.message(Command("ws"))
+async def cmd_ws(m: Message):
+    parts = m.text.split()
+    if len(parts) < 2: return await m.answer("Формат: /ws BTC")
+    sym = norm_symbol(parts[1])
+    asyncio.create_task(ws_stream_gate(sym, m.chat.id))
+    await m.answer(f"Запускаю WebSocket для {sym}...")
+
+@dp.message(Command("stop_ws"))
+async def cmd_stop_ws(m: Message):
+    await m.answer("Чтобы остановить трансляцию, просто перезапусти бота в Render (или напиши /start).")
 
 # --- ФОНОВЫЙ ЦИКЛ ---
 async def checker_loop():
