@@ -469,7 +469,7 @@ async def checker_loop():
                         except: pass
 
                     if notify:
-                        await bot.send_message(t["user_id"], f"📈 {t['symbol']}: {curr_price} (шаг: {step})")
+                        await bot.send_message(t["user_id"], f"{t['symbol']}: {curr_price} (шаг: {step})")
                         await update_tracker_last(t["id"], curr_price)
                 except Exception as e: 
                     await log_error_to_db(f"Tracker {t['id']} failed: {e}")
