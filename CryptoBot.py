@@ -33,7 +33,7 @@ DB_PATH = "alerts.db"
 
 _client = None
 USER_SCANS = {}
-START_PRICES = {}  # Словарь для хранения стартовых цен: {symbol: price}
+START_PRICES = {}
 
 def get_client():
     global _client
@@ -548,12 +548,10 @@ async def pump_scanner_loop():
         if not USER_SCANS: continue
         
         try:
-            # Получаем актуальные цены
             r = await get_client().get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=15)
             if r.status_code == 200:
                 current_tickers = {t["symbol"]: float(t["lastPrice"]) for t in r.json()["result"]["list"]}
                 
-                # Если стартовые цены не были сохранены (например после перезагрузки сервера)
                 if not START_PRICES:
                     START_PRICES = current_tickers
                     continue
@@ -567,7 +565,6 @@ async def pump_scanner_loop():
                         start_price = START_PRICES[sym]
                         if start_price == 0: continue
                         
-                        # Считаем процент изменения от старта
                         change_pct = ((current_price - start_price) / start_price) * 100
                         
                         if abs(change_pct) >= threshold:
@@ -592,4 +589,16 @@ async def start_dummy_server():
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+
+async def main():
+    await init_db()
+    asyncio.create_task(checker_loop())
+    asyncio.create_task(start_dummy_server())
+    asyncio.create_task(pump_scanner_loop())
+    try: await dp.start_polling(bot)
+    finally: await close_client(); await bot.session.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
