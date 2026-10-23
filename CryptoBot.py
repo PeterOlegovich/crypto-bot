@@ -44,7 +44,6 @@ async def close_client():
         await _client.aclose()
         _client = None
 
-# --- ХЕЛПЕР ДЛЯ ЗАПРОСОВ (ЧТОБЫ НЕ КЕШИРОВАЛОСЬ) ---
 def get_headers():
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -83,51 +82,84 @@ async def get_price(symbol: str) -> float:
 
 async def get_funding(symbol: str) -> dict:
     rnd = random.randint(1, 999999)
+    results = []
+    final_funding_pct = 0.0
+    final_mark = 0.0
+    final_next_ms = 0
+    found = False
+
     # 1. Binance
     try:
         r = await get_client().get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}&t={rnd}", headers=get_headers(), timeout=3)
         if r.status_code == 200:
             d = r.json()
-            return {"mark": float(d["markPrice"]), "funding_pct": float(d["lastFundingRate"]) * 100, "next_funding_ms": int(d["nextFundingTime"])}
+            results.append(f"Binance: {float(d['lastFundingRate'])*100:.4f}% (Mark: {d['markPrice']})")
+            if not found:
+                final_funding_pct, final_mark, final_next_ms = float(d["lastFundingRate"])*100, float(d["markPrice"]), int(d["nextFundingTime"])
+                found = True
     except Exception: pass
+
     # 2. Bybit
     try:
         r = await get_client().get(f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}&t={rnd}", headers=get_headers(), timeout=3)
         if r.status_code == 200:
             data = r.json()["result"]["list"][0]
-            return {"mark": float(data["markPrice"]), "funding_pct": float(data["fundingRate"]) * 100, "next_funding_ms": int(data["nextFundingTime"])}
+            results.append(f"Bybit: {float(data['fundingRate'])*100:.4f}% (Mark: {data['markPrice']})")
+            if not found:
+                final_funding_pct, final_mark, final_next_ms = float(data["fundingRate"])*100, float(data["markPrice"]), int(data["nextFundingTime"])
+                found = True
     except Exception: pass
-    # 3. OKX
-    try:
-        okx_sym = "TON-USDT" if symbol == "TONUSDT" else symbol.replace("USDT", "-USDT")
-        r = await get_client().get(f"https://www.okx.com/api/v5/public/funding-rate?instId={okx_sym}&t={rnd}", headers=get_headers(), timeout=3)
-        if r.status_code == 200:
-            data = r.json()["data"][0]
-            return {"mark": float(data["markPx"]), "funding_pct": float(data["fundingRate"]) * 100, "next_funding_ms": int(data["fundingTime"])}
-    except Exception: pass
-    # 4. Gate.io
+
+    # 3. Gate.io
     try:
         gate_sym = symbol.replace("USDT", "_USDT")
         r = await get_client().get(f"https://api.gateio.ws/api/v4/futures/usdt/contracts/{gate_sym}?t={rnd}", headers=get_headers(), timeout=3)
         if r.status_code == 200:
             d = r.json()
-            return {"mark": float(d["mark_price"]), "funding_pct": float(d["funding_rate"]) * 100, "next_funding_ms": int(d["funding_next_apply"]) * 1000}
+            results.append(f"Gate.io: {float(d['funding_rate'])*100:.4f}% (Mark: {d['mark_price']})")
+            if not found:
+                final_funding_pct, final_mark, final_next_ms = float(d["funding_rate"])*100, float(d["mark_price"]), int(d["funding_next_apply"]) * 1000
+                found = True
     except Exception: pass
-    # 5. MEXC
+
+    # 4. OKX
+    try:
+        okx_sym = "TON-USDT" if symbol == "TONUSDT" else symbol.replace("USDT", "-USDT")
+        r = await get_client().get(f"https://www.okx.com/api/v5/public/funding-rate?instId={okx_sym}&t={rnd}", headers=get_headers(), timeout=3)
+        if r.status_code == 200:
+            data = r.json()["data"][0]
+            results.append(f"OKX: {float(data['fundingRate'])*100:.4f}% (Mark: {data['markPx']})")
+            if not found:
+                final_funding_pct, final_mark, final_next_ms = float(data["fundingRate"])*100, float(data["markPx"]), int(data["fundingTime"])
+                found = True
+    except Exception: pass
+
+    # 5. MEXC (если остальные не отдали)
     try:
         mexc_sym = "GRAMUSDT" if symbol == "TONUSDT" else symbol
         r = await get_client().get(f"https://api.mexc.com/api/v3/ticker/price?symbol={mexc_sym}&t={rnd}", headers=get_headers(), timeout=3)
-        if r.status_code == 200: 
-            return {"mark": float(r.json()["price"]), "funding_pct": 0.0, "next_funding_ms": 0}
+        if r.status_code == 200:
+            results.append(f"MEXC: нет фандинга (Mark: {r.json()['price']})")
+            if not found:
+                final_funding_pct, final_mark, final_next_ms = 0.0, float(r.json()["price"]), 0
+                found = True
     except Exception: pass
-    raise Exception("Не удалось получить данные о фандинге ни с одной биржи")
+
+    if not results:
+        raise Exception("Не удалось получить данные о фандинге ни с одной биржи")
+
+    return {
+        "funding_pct": final_funding_pct,
+        "mark": final_mark,
+        "next_funding_ms": final_next_ms,
+        "all_sources": "\n".join(results)
+    }
 
 async def get_long_short_ratio(symbol: str) -> str:
     rnd = random.randint(1, 999999)
     lsr_text = "Long/Short: данные недоступны"
     oi_text = ""
 
-    # 1. Bybit
     try:
         r = await get_client().get(f"https://api.bybit.com/v5/market/account-ratio?category=linear&symbol={symbol}&period=5min&t={rnd}", headers=get_headers(), timeout=3)
         if r.status_code == 200:
@@ -137,7 +169,6 @@ async def get_long_short_ratio(symbol: str) -> str:
             lsr_text = f"Long/Short (Bybit): {buy_ratio:.1f}% лонгов / {sell_ratio:.1f}% шортов"
     except Exception: pass
 
-    # 2. Binance (для альткоинов)
     if "недоступны" in lsr_text:
         try:
             r = await get_client().get(f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={symbol}&period=5m&limit=1&t={rnd}", headers=get_headers(), timeout=3)
@@ -148,7 +179,6 @@ async def get_long_short_ratio(symbol: str) -> str:
                 lsr_text = f"Long/Short (Binance): {buy_ratio:.1f}% лонгов / {sell_ratio:.1f}% шортов"
         except Exception: pass
 
-    # 3. OKX (для BTC и ETH)
     if "недоступны" in lsr_text:
         try:
             okx_ccy = "BTC" if "BTC" in symbol else ("ETH" if "ETH" in symbol else None)
@@ -162,7 +192,6 @@ async def get_long_short_ratio(symbol: str) -> str:
                     lsr_text = f"Long/Short (OKX): {buy_ratio:.1f}% лонгов / {sell_ratio:.1f}% шортов"
         except Exception: pass
 
-    # Open Interest
     try:
         r = await get_client().get(f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}&t={rnd}", headers=get_headers(), timeout=3)
         if r.status_code == 200:
@@ -279,8 +308,8 @@ HELP_TEXT = (
     "/price BTC — цена любой монеты\n\n"
     "Фандинг (ставка за перенос):\n"
     "/funding BTC — узнать фандинг и соотношение лонг/шорт\n"
-    "(Если фандинг положительный — лонги платят шортам. Если отрицательный — наоборот.)\n"
-    "(Если шортов 70%+ и фандинг отрицательный — это сигнал к возможному пампу (шорт-сквизу), толпа ставит на падение, но рынок может пойти вверх)\n\n"
+    "(Выводит данные сразу с нескольких бирж для сравнения)\n"
+    "(Если фандинг положительный — лонги платят шортам. Если отрицательный — наоборот.)\n\n"
     "Алерты (уведомления):\n"
     "/alert price BTC > 80000 — пришлет пуш, если цена пересечет уровень\n"
     "/alert funding BTC > 0.05 — пуш по фандингу\n"
@@ -336,11 +365,13 @@ async def cmd_funding(m: Message):
         f = await get_funding(sym)
         l_s_ratio = await get_long_short_ratio(sym)
         funding_text = "Лонги платят шортам" if f['funding_pct'] > 0 else ("Шорты платят лонгам" if f['funding_pct'] < 0 else "Ставка 0")
+        
         await m.answer(
             f"{sym}\n"
             f"Цена маркировки: {f['mark']}\n"
             f"Ставка за перенос: {f['funding_pct']:.4f}% ({funding_text})\n"
             f"Следующее начисление: {fmt_ts(f['next_funding_ms'])}\n\n"
+            f"ДАННЫЕ С БИРЖ:\n{f['all_sources']}\n\n"
             f"{l_s_ratio}", 
             reply_markup=get_back_menu()
         )
