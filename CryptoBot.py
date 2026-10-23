@@ -21,7 +21,7 @@ if not BOT_TOKEN:
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 CHECK_INTERVAL = 10
-SCAN_INTERVAL = 60  # Сканер проверяет рынок каждую минуту (60 секунд)
+SCAN_INTERVAL = 60  # Сканер проверяет каждую минуту
 # ==========================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -33,6 +33,7 @@ DB_PATH = "alerts.db"
 
 _client = None
 USER_SCANS = {}
+START_PRICES = {}  # Словарь для хранения стартовых цен: {symbol: price}
 
 def get_client():
     global _client
@@ -288,7 +289,7 @@ HELP_TEXT = (
     "/trackers — список трекеров\n"
     "/deltrack 1 — удалить трекер\n\n"
     "Сканер Пампов (Поиск движух):\n"
-    "/scan — запустить поиск монет с резким изменением цены\n"
+    "/scan — запустить поиск монет с резким изменением цены от момента запуска\n"
     "/stop_scan — остановить сканер\n\n"
     "Узнать цену:"
 )
@@ -319,9 +320,21 @@ async def cmd_scan(m: Message):
 
 @dp.callback_query(F.data.startswith("scan_"))
 async def callback_scan(c: CallbackQuery):
+    global START_PRICES
     threshold = float(c.data.split("_")[1])
     USER_SCANS[c.from_user.id] = threshold
-    await c.message.edit_text(f"Сканер запущен!\nЯ буду присылать тебе монеты, которые изменились на {threshold}% и более.\n(Проверяю каждую минуту)\n\nЧтобы остановить, напиши /stop_scan")
+    
+    await c.message.edit_text("Запускаю сканер... Запоминаю текущие цены.")
+    
+    try:
+        r = await get_client().get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=15)
+        if r.status_code == 200:
+            START_PRICES = {t["symbol"]: float(t["lastPrice"]) for t in r.json()["result"]["list"]}
+            await c.message.edit_text(f"Сканер запущен!\nЯ запомнил текущие цены всех монет.\nЕсли что-то изменится на {threshold}% от этих цен, я сразу пришлю.\n(Проверяю каждую минуту)\n\nЧтобы остановить, напиши /stop_scan")
+        else:
+            await c.message.edit_text("Ошибка при получении цен от биржи. Попробуй позже.")
+    except Exception as e:
+        await c.message.edit_text(f"Ошибка: {e}")
     await c.answer()
 
 @dp.message(Command("stop_scan"))
@@ -528,27 +541,41 @@ async def checker_loop():
         await asyncio.sleep(CHECK_INTERVAL)
 
 async def pump_scanner_loop():
+    global START_PRICES
     log.info("Pump Scanner started")
     while True:
         await asyncio.sleep(SCAN_INTERVAL)
         if not USER_SCANS: continue
         
         try:
+            # Получаем актуальные цены
             r = await get_client().get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=15)
             if r.status_code == 200:
-                tickers = r.json()["result"]["list"]
+                current_tickers = {t["symbol"]: float(t["lastPrice"]) for t in r.json()["result"]["list"]}
                 
+                # Если стартовые цены не были сохранены (например после перезагрузки сервера)
+                if not START_PRICES:
+                    START_PRICES = current_tickers
+                    continue
+
                 for user_id, threshold in USER_SCANS.items():
                     found_pumps = []
-                    for t in tickers:
-                        if not t["symbol"].endswith("USDT"): continue
-                        change_pct = float(t["price24hPcnt"]) * 100
+                    for sym, current_price in current_tickers.items():
+                        if not sym.endswith("USDT"): continue
+                        if sym not in START_PRICES: continue
+                        
+                        start_price = START_PRICES[sym]
+                        if start_price == 0: continue
+                        
+                        # Считаем процент изменения от старта
+                        change_pct = ((current_price - start_price) / start_price) * 100
+                        
                         if abs(change_pct) >= threshold:
                             direction = "выросла" if change_pct > 0 else "упала"
-                            found_pumps.append(f"{t['symbol']}: {direction} на {abs(change_pct):.1f}% (Цена: {t['lastPrice']}) [Bybit]")
+                            found_pumps.append(f"{sym}: {direction} на {abs(change_pct):.1f}% (Старт: {start_price} -> Сейчас: {current_price}) [Bybit]")
                     
                     if found_pumps:
-                        text = f"Сканер: Найдены движения на {threshold}%+!\n\n" + "\n".join(found_pumps[:15])
+                        text = f"Сканер (от момента запуска): Движения на {threshold}%+!\n\n" + "\n".join(found_pumps[:15])
                         try:
                             await bot.send_message(user_id, text)
                             await asyncio.sleep(0.1)
@@ -565,16 +592,4 @@ async def start_dummy_server():
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-
-async def main():
-    await init_db()
-    asyncio.create_task(checker_loop())
-    asyncio.create_task(start_dummy_server())
-    asyncio.create_task(pump_scanner_loop())
-    try: await dp.start_polling(bot)
-    finally: await close_client(); await bot.session.close()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    site = web.TCPSite(runner, '0.0
