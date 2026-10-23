@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 
 import aiosqlite
@@ -8,13 +9,17 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, TelegramObject, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.client.default import DefaultBotProperties
+from aiohttp import web
 
 # ==========================================
-# НАСТРОЙКИ (ВСТАВЬ СВОЙ ТОКЕН)
+# НАСТРОЙКИ (ТОКЕН БЕРЕТСЯ ИЗ RENDER)
 # ==========================================
-BOT_TOKEN = "8948847860:AAE2g13U8J1WhP6wPpquNiV9ZzErPFJR3NY"
-ALLOWED_USER_IDS = []
-CHECK_INTERVAL = 60
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не найден в переменных окружения!")
+
+ALLOWED_USER_IDS = [] 
+CHECK_INTERVAL = 10
 # ==========================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -41,87 +46,47 @@ async def close_client():
 # --- ФУНКЦИИ С ПОДДЕРЖКОЙ ТРЕХ БИРЖ ---
 
 async def get_price(symbol: str) -> float:
-    # 1. Пробуем Binance
     try:
         r = await get_client().get(f"https://fapi.binance.com/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=3)
-        if r.status_code == 200:
-            return float(r.json()["price"])
-    except Exception:
-        pass
-
-    # 2. Если Binance заблокирован, пробуем Bybit
+        if r.status_code == 200: return float(r.json()["price"])
+    except Exception: pass
     try:
         r = await get_client().get(f"https://api.bybit.com/v5/market/tickers", params={"category": "linear", "symbol": symbol}, timeout=3)
-        if r.status_code == 200:
-            data = r.json()["result"]["list"][0]
-            return float(data["lastPrice"])
-    except Exception:
-        pass
-
-    # 3. Если и Bybit не ответил, идем в OKX (там тикер пишется через дефис: BTC-USDT)
+        if r.status_code == 200: return float(r.json()["result"]["list"][0]["lastPrice"])
+    except Exception: pass
     try:
-        okx_sym = symbol.replace("USDT", "-USDT")
+        okx_sym = "TON-USDT" if symbol == "TONUSDT" else symbol.replace("USDT", "-USDT")
         r = await get_client().get(f"https://www.okx.com/api/v5/market/ticker", params={"instId": okx_sym}, timeout=3)
-        if r.status_code == 200:
-            data = r.json()["data"][0]
-            return float(data["last"])
-    except Exception:
-        pass
-
+        if r.status_code == 200: return float(r.json()["data"][0]["last"])
+    except Exception: pass
     raise Exception("Все биржи недоступны или монета не найдена")
 
 async def get_funding(symbol: str) -> dict:
-    # 1. Binance
     try:
         r = await get_client().get(f"https://fapi.binance.com/fapi/v1/premiumIndex", params={"symbol": symbol}, timeout=3)
         if r.status_code == 200:
             d = r.json()
-            return {
-                "mark": float(d["markPrice"]),
-                "funding_pct": float(d["lastFundingRate"]) * 100,
-                "next_funding_ms": int(d["nextFundingTime"]),
-            }
-    except Exception:
-        pass
-
-    # 2. Bybit
+            return {"mark": float(d["markPrice"]), "funding_pct": float(d["lastFundingRate"]) * 100, "next_funding_ms": int(d["nextFundingTime"])}
+    except Exception: pass
     try:
         r = await get_client().get(f"https://api.bybit.com/v5/market/tickers", params={"category": "linear", "symbol": symbol}, timeout=3)
         if r.status_code == 200:
             data = r.json()["result"]["list"][0]
-            return {
-                "mark": float(data["markPrice"]),
-                "funding_pct": float(data["fundingRate"]) * 100,
-                "next_funding_ms": int(data["nextFundingTime"]),
-            }
-    except Exception:
-        pass
-
-    # 3. OKX
+            return {"mark": float(data["markPrice"]), "funding_pct": float(data["fundingRate"]) * 100, "next_funding_ms": int(data["nextFundingTime"])}
+    except Exception: pass
     try:
-        okx_sym = symbol.replace("USDT", "-USDT")
+        okx_sym = "TON-USDT" if symbol == "TONUSDT" else symbol.replace("USDT", "-USDT")
         r = await get_client().get(f"https://www.okx.com/api/v5/public/funding-rate", params={"instId": okx_sym}, timeout=3)
         if r.status_code == 200:
             data = r.json()["data"][0]
-            return {
-                "mark": float(data["markPx"]), 
-                "funding_pct": float(data["fundingRate"]) * 100,
-                "next_funding_ms": int(data["fundingTime"]),
-            }
-    except Exception:
-        pass
+            return {"mark": float(data["markPx"]), "funding_pct": float(data["fundingRate"]) * 100, "next_funding_ms": int(data["fundingTime"])}
+    except Exception: pass
+    raise Exception("Не удалось получить данные о фандинге")
 
-    raise Exception("Не удалось получить данные о фандинге ни с одной биржи")
-
-# --- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ ---
-
+# --- БАЗА ДАННЫХ ---
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS alerts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL, symbol TEXT NOT NULL, op TEXT NOT NULL, threshold REAL NOT NULL, triggered INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS trackers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, symbol TEXT NOT NULL, base_price REAL NOT NULL, step TEXT NOT NULL, last_notified REAL NOT NULL
-);
+CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL, symbol TEXT NOT NULL, op TEXT NOT NULL, threshold REAL NOT NULL, triggered INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS trackers (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, symbol TEXT NOT NULL, base_price REAL NOT NULL, step TEXT NOT NULL, last_notified REAL NOT NULL);
 """
 
 async def init_db():
@@ -129,46 +94,58 @@ async def init_db():
         await db.executescript(SCHEMA)
         await db.commit()
 
-async def add_alert(user_id: int, kind: str, symbol: str, op: str, threshold: float) -> int:
+async def add_alert(user_id, kind, symbol, op, threshold) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("INSERT INTO alerts (user_id, kind, symbol, op, threshold) VALUES (?, ?, ?, ?, ?)", (user_id, kind, symbol, op, threshold))
         await db.commit()
         return cur.lastrowid
 
-async def get_active_alerts(user_id: int | None = None):
+async def get_active_alerts(user_id=None):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         if user_id is None: cur = await db.execute("SELECT * FROM alerts WHERE triggered = 0")
         else: cur = await db.execute("SELECT * FROM alerts WHERE triggered = 0 AND user_id = ?", (user_id,))
         return await cur.fetchall()
 
-async def mark_triggered(alert_id: int, user_id: int | None = None):
+async def mark_triggered(alert_id, user_id=None):
     async with aiosqlite.connect(DB_PATH) as db:
         if user_id is None: await db.execute("UPDATE alerts SET triggered = 1 WHERE id = ?", (alert_id,))
         else: await db.execute("UPDATE alerts SET triggered = 1 WHERE id = ? AND user_id = ?", (alert_id, user_id))
         await db.commit()
 
-async def add_tracker(user_id: int, symbol: str, base_price: float, step: str) -> int:
+async def add_tracker(user_id, symbol, base_price, step) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("INSERT INTO trackers (user_id, symbol, base_price, step, last_notified) VALUES (?, ?, ?, ?, ?)", (user_id, symbol, base_price, step, base_price))
         await db.commit()
         return cur.lastrowid
 
-async def get_trackers(user_id: int | None = None):
+async def get_trackers(user_id=None):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         if user_id is None: cur = await db.execute("SELECT * FROM trackers")
         else: cur = await db.execute("SELECT * FROM trackers WHERE user_id = ?", (user_id,))
         return await cur.fetchall()
 
-async def update_tracker_last(tr_id: int, price: float):
+async def update_tracker_last(tr_id, price):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE trackers SET last_notified = ? WHERE id = ?", (price, tr_id))
         await db.commit()
 
-async def del_tracker(tr_id: int, user_id: int):
+async def del_tracker(tr_id, user_id):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM trackers WHERE id = ? AND user_id = ?", (tr_id, user_id))
+        await db.commit()
+
+# --- СБРОС ID ---
+async def reset_db_ids():
+    async with aiosqlite.connect(DB_PATH) as db:
+        count_alerts = (await (await db.execute("SELECT COUNT(*) FROM alerts WHERE triggered = 0")).fetchone())[0]
+        if count_alerts == 0:
+            await db.execute("DELETE FROM sqlite_sequence WHERE name='alerts'")
+            
+        count_trackers = (await (await db.execute("SELECT COUNT(*) FROM trackers")).fetchone())[0]
+        if count_trackers == 0:
+            await db.execute("DELETE FROM sqlite_sequence WHERE name='trackers'")
         await db.commit()
 
 class WhitelistMiddleware(BaseMiddleware):
@@ -183,159 +160,149 @@ dp.callback_query.middleware(WhitelistMiddleware())
 def norm_symbol(raw: str) -> str:
     s = raw.upper()
     if s in ("GOLD", "ЗОЛОТО", "XAU"): return "PAXGUSDT"
+    if s in ("GRAM", "TON"): return "TONUSDT"
     return s if s.endswith("USDT") else s + "USDT"
 
-def check_op(value: float, op: str, threshold: float) -> bool:
+def check_op(value, op, threshold):
     return value > threshold if op == ">" else value < threshold
 
-def fmt_ts(ms: int) -> str:
+def fmt_ts(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+# --- КНОПКИ ---
 def get_inline_menu():
     kb = [
         [InlineKeyboardButton(text="🟡 BTC", callback_data="price_BTC"), InlineKeyboardButton(text="🔵 ETH", callback_data="price_ETH")],
-        [InlineKeyboardButton(text="💎 TON", callback_data="price_TON"), InlineKeyboardButton(text="🟣 SOL", callback_data="price_SOL")],
+        [InlineKeyboardButton(text="💎 GRAM", callback_data="price_GRAM"), InlineKeyboardButton(text="🟣 SOL", callback_data="price_SOL")],
         [InlineKeyboardButton(text="🥇 Золото", callback_data="price_GOLD")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_back_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Назад", callback_data="back")]])
 
+HELP_TEXT = (
+    "криптопенис эрегирует!\n\n"
+    "ФУЛЛ ИНСТРУКЦИЯ\n\n"
+    "Цены:\n"
+    "/price BTC — цена любой монеты\n"
+    "(Кнопки ниже показывают цены в 1 клик)\n\n"
+    "Фандинг (ставка за перенос):\n"
+    "/funding BTC — узнать фандинг\n"
+    "(Если фандинг положительный — лонги платят шортам. Если отрицательный — наоборот. Высокий фандинг = рынок перегрет)\n\n"
+    "Алерты (уведомления):\n"
+    "/alert price BTC > 80000 — пришлет пуш, если цена пересечет уровень\n"
+    "/alert funding BTC > 0.05 — пуш по фандингу\n"
+    "/alerts — список активных алертов\n"
+    "/del 1 — удалить алерт по номеру\n\n"
+    "Трекеры (следят за изменением):\n"
+    "/track BTC 81520 5% — следить за изменением на 5%\n"
+    "(Если не знаешь цену, пиши 0 вместо 81520, бот сам возьмет текущую)\n"
+    "Шаги: 5s (5 сек), 1m (1 мин), 1h (1 час), 5% (5%), 100 (на 100)\n"
+    "/trackers — список трекеров\n"
+    "/deltrack 1 — удалить трекер\n\n"
+    "Узнать цену:"
+)
+
+# --- ХЭНДЛЕРЫ ---
 @dp.message(Command("start"))
+@dp.message(Command("help"))
 async def cmd_start(m: Message):
-    await m.answer(
-        "криптопенис эрегирует!\n\n"
-        "Доступные команды:\n"
-        "/price ETH — цена\n"
-        "/funding ETH — ставка за перенос\n"
-        "/alert price ETH > 3000 — алерт\n"
-        "/alerts — список алертов\n"
-        "/del 1 — удалить алерт\n"
-        "/track — инструкция к трекеру\n"
-        "/trackers — список трекеров\n"
-        "/deltrack 1 — удалить трекер\n\n"
-        "Или жми кнопки ниже:",
-        reply_markup=get_inline_menu()
-    )
+    await m.answer(HELP_TEXT, reply_markup=get_inline_menu())
 
 @dp.callback_query(F.data.startswith("price_"))
 async def callback_price(c: CallbackQuery):
     sym_name = c.data.split("_")[1]
-    sym = "PAXGUSDT" if sym_name == "GOLD" else f"{sym_name}USDT"
+    if sym_name == "GOLD": sym = "PAXGUSDT"
+    elif sym_name == "GRAM": sym = "TONUSDT"
+    else: sym = f"{sym_name}USDT"
     try:
         p = await get_price(sym)
-        await c.message.edit_text(f"{sym}: {p}", reply_markup=get_back_menu())
+        await c.message.edit_text(f"{sym_name}: {p}", reply_markup=get_back_menu())
     except Exception as e:
         await c.message.edit_text(f"Ошибка: {e}", reply_markup=get_back_menu())
     await c.answer()
 
 @dp.callback_query(F.data == "back")
 async def callback_back(c: CallbackQuery):
-    await c.message.edit_text(
-        "криптопенис эрегирует!!\n\n"
-        "Доступные команды:\n"
-        "/price ETH — цена\n"
-        "/funding ETH — ставка за перенос\n"
-        "/alert price ETH > 3000 — алерт\n"
-        "/alerts — список алертов\n"
-        "/del 1 — удалить алерт\n"
-        "/track — инструкция к трекеру\n"
-        "/trackers — список трекеров\n"
-        "/deltrack 1 — удалить трекер\n\n"
-        "Или жми кнопки ниже:",
-        reply_markup=get_inline_menu()
-    )
+    await c.message.edit_text(HELP_TEXT, reply_markup=get_inline_menu())
     await c.answer()
 
 @dp.message(Command("price"))
 async def cmd_price(m: Message):
     parts = m.text.split()
-    if len(parts) < 2: return await m.answer("Формат: /price ETH")
+    if len(parts) < 2: return await m.answer("Формат: /price BTC", reply_markup=get_back_menu())
     sym = norm_symbol(parts[1])
-    try: await m.answer(f"{sym}: {await get_price(sym)}")
-    except Exception as e: await m.answer(f"Ошибка: {e}")
+    try: await m.answer(f"{sym}: {await get_price(sym)}", reply_markup=get_back_menu())
+    except Exception as e: await m.answer(f"Ошибка: {e}", reply_markup=get_back_menu())
 
 @dp.message(Command("funding"))
 async def cmd_funding(m: Message):
     parts = m.text.split()
-    if len(parts) < 2: return await m.answer("Формат: /funding ETH")
+    if len(parts) < 2: return await m.answer("Формат: /funding BTC", reply_markup=get_back_menu())
     sym = norm_symbol(parts[1])
     try:
         f = await get_funding(sym)
-        await m.answer(f"{sym}\nЦена маркировки: {f['mark']}\nСтавка за перенос позиции: {f['funding_pct']:.4f}%\nСледующее начисление: {fmt_ts(f['next_funding_ms'])}")
-    except Exception as e: await m.answer(f"Ошибка: {e}")
+        await m.answer(f"{sym}\nЦена маркировки: {f['mark']}\nСтавка за перенос: {f['funding_pct']:.4f}%\nСледующее начисление: {fmt_ts(f['next_funding_ms'])}", reply_markup=get_back_menu())
+    except Exception as e: await m.answer(f"Ошибка: {e}", reply_markup=get_back_menu())
 
 @dp.message(Command("alert"))
 async def cmd_alert(m: Message):
     parts = m.text.split()
-    if len(parts) != 5: return await m.answer("Формат: /alert price ETH > 3000")
+    if len(parts) != 5: return await m.answer("Формат: /alert price BTC > 3000", reply_markup=get_back_menu())
     kind, sym_raw, op, val = parts[1].lower(), parts[2], parts[3], parts[4]
-    if kind not in ("price", "funding"): return await m.answer("kind: price или funding")
-    if op not in (">", "<"): return await m.answer("op: > или <")
+    if kind not in ("price", "funding"): return await m.answer("kind: price или funding", reply_markup=get_back_menu())
+    if op not in (">", "<"): return await m.answer("op: > или <", reply_markup=get_back_menu())
     try: threshold = float(val)
-    except ValueError: return await m.answer("value должно быть числом")
+    except ValueError: return await m.answer("value должно быть числом", reply_markup=get_back_menu())
     sym = norm_symbol(sym_raw)
     aid = await add_alert(m.from_user.id, kind, sym, op, threshold)
-    await m.answer(f"Алерт #{aid} создан: {kind} {sym} {op} {threshold}")
+    await m.answer(f"Алерт #{aid} создан: {kind} {sym} {op} {threshold}", reply_markup=get_back_menu())
 
 @dp.message(Command("alerts"))
 async def cmd_alerts(m: Message):
     rows = await get_active_alerts(m.from_user.id)
-    if not rows: return await m.answer("Активных алертов нет")
-    await m.answer("\n".join([f"#{r['id']} {r['kind']} {r['symbol']} {r['op']} {r['threshold']}" for r in rows]))
+    if not rows: return await m.answer("Активных алертов нет", reply_markup=get_back_menu())
+    await m.answer("\n".join([f"#{r['id']} {r['kind']} {r['symbol']} {r['op']} {r['threshold']}" for r in rows]), reply_markup=get_back_menu())
 
 @dp.message(Command("del"))
 async def cmd_del(m: Message):
     parts = m.text.split()
-    if len(parts) != 2: return await m.answer("Формат: /del <id>")
+    if len(parts) != 2: return await m.answer("Формат: /del <id>", reply_markup=get_back_menu())
     await mark_triggered(int(parts[1]), m.from_user.id)
-    await m.answer(f"Алерт #{parts[1]} удален")
+    await reset_db_ids()
+    await m.answer(f"Алерт #{parts[1]} удален", reply_markup=get_back_menu())
 
 @dp.message(Command("track"))
 async def cmd_track(m: Message):
     parts = m.text.split()
-    if len(parts) != 4:
-        return await m.answer(
-            "📖 ИНСТРУКЦИЯ К ТРЕКЕРУ\n\n"
-            "Формат команды:\n"
-            "/track <МОНЕТА> <СТАРТОВАЯ ЦЕНА> <ШАГ>\n\n"
-            "1️⃣ МОНЕТА:\n"
-            "Пиши тикер: ETH, BTC, SOL, TON или ЗОЛОТО.\n\n"
-            "2️⃣ СТАРТОВАЯ ЦЕНА:\n"
-            "Цена, от которой начинаем отсчет (просто число).\n\n"
-            "3️⃣ ШАГ (когда присылать уведомление):\n"
-            "• Цифра (например, 5) — пришлет уведомление каждый раз, когда цена изменится на $5 (2505, 2495, 2490 и т.д.).\n"
-            "• 1m — будет присылать каждую минуту, если цена хоть на копейку дернулась.\n"
-            "• 1% — пришлет, когда цена изменится на 1%.\n\n"
-            "Примеры:\n"
-            "/track ETH 2500 5\n"
-            "/track BTC 80000 100\n"
-            "/track SOL 150 1m\n\n"
-            "Посмотреть активные: /trackers\n"
-            "Удалить: /deltrack <номер>"
-        )
+    if len(parts) != 4: return await m.answer("Формат: /track BTC 81520 5% (если не знаешь цену, пиши 0)", reply_markup=get_back_menu())
     sym_raw, base_price_str, step = parts[1], parts[2], parts[3].lower()
     try: base_price = float(base_price_str)
-    except: return await m.answer("Базовая цена должна быть числом")
+    except: return await m.answer("Базовая цена должна быть числом", reply_markup=get_back_menu())
     sym = norm_symbol(sym_raw)
+    if base_price == 0:
+        try: base_price = await get_price(sym)
+        except Exception as e: return await m.answer(f"Ошибка получения цены: {e}", reply_markup=get_back_menu())
     tid = await add_tracker(m.from_user.id, sym, base_price, step)
-    await m.answer(f"✅ Трекер #{tid} создан!\nСлежу за {sym} от {base_price}, шаг: {step}")
+    await m.answer(f"Трекер #{tid} создан!\nСлежу за {sym} от {base_price}, шаг: {step}", reply_markup=get_back_menu())
 
 @dp.message(Command("trackers"))
 async def cmd_trackers(m: Message):
     rows = await get_trackers(m.from_user.id)
-    if not rows: return await m.answer("Нет активных трекеров")
+    if not rows: return await m.answer("Нет активных трекеров", reply_markup=get_back_menu())
     lines = [f"#{r['id']} {r['symbol']} от {r['base_price']}, шаг {r['step']}" for r in rows]
-    await m.answer("Твои трекеры:\n" + "\n".join(lines) + "\n\nУдалить: /deltrack <id>")
+    await m.answer("Твои трекеры:\n" + "\n".join(lines) + "\n\nУдалить: /deltrack <id>", reply_markup=get_back_menu())
 
 @dp.message(Command("deltrack"))
 async def cmd_deltrack(m: Message):
     parts = m.text.split()
-    if len(parts) != 2: return await m.answer("Формат: /deltrack <id>")
+    if len(parts) != 2: return await m.answer("Формат: /deltrack <id>", reply_markup=get_back_menu())
     await del_tracker(int(parts[1]), m.from_user.id)
-    await m.answer(f"Трекер #{parts[1]} удален")
+    await reset_db_ids()
+    await m.answer(f"Трекер #{parts[1]} удален", reply_markup=get_back_menu())
 
+# --- ФОНОВЫЙ ЦИКЛ ---
 async def checker_loop():
     log.info("Checker loop started")
     while True:
@@ -345,8 +312,9 @@ async def checker_loop():
                     if a["kind"] == "price": value = await get_price(a["symbol"])
                     else: value = (await get_funding(a["symbol"]))["funding_pct"]
                     if check_op(value, a["op"], a["threshold"]):
-                        await bot.send_message(a["user_id"], f"🚨 Алерт #{a['id']}: {a['kind']} {a['symbol']} = {value}")
+                        await bot.send_message(a["user_id"], f"Алерт #{a['id']}: {a['kind']} {a['symbol']} = {value}")
                         await mark_triggered(a["id"])
+                        await reset_db_ids()
                 except Exception as e: log.warning("Alert %s failed: %s", a["id"], e)
 
             for t in await get_trackers():
@@ -356,7 +324,7 @@ async def checker_loop():
                     step = t["step"]
                     notify = False
                     
-                    if step.endswith("m"):
+                    if step.endswith("s") or step.endswith("m") or step.endswith("h"):
                         if curr_price != last_price: notify = True
                     elif step.endswith("%"):
                         pct = float(step.replace("%", "")) / 100
@@ -375,9 +343,7 @@ async def checker_loop():
         except Exception: log.exception("checker_loop failed")
         await asyncio.sleep(CHECK_INTERVAL)
 
-# --- Импортируем библиотеку для мини-сайта (пишем прямо здесь) ---
-from aiohttp import web
-
+# --- ЗАПУСК ---
 async def handle_ping(request):
     return web.Response(text="Bot is alive!")
 
@@ -388,12 +354,11 @@ async def start_dummy_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 8080)
     await site.start()
-    log.info("Dummy web server started on port 8080")
 
 async def main():
     await init_db()
     asyncio.create_task(checker_loop())
-    asyncio.create_task(start_dummy_server())  # Запускаем мини-сайт
+    asyncio.create_task(start_dummy_server())
     try: await dp.start_polling(bot)
     finally: await close_client(); await bot.session.close()
 
