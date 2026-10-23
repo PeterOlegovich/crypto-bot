@@ -44,7 +44,6 @@ async def close_client():
         _client = None
 
 # --- ФУНКЦИИ С ПОДДЕРЖКОЙ ТРЕХ БИРЖ ---
-
 async def get_price(symbol: str) -> float:
     try:
         r = await get_client().get(f"https://fapi.binance.com/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=3)
@@ -59,6 +58,14 @@ async def get_price(symbol: str) -> float:
         r = await get_client().get(f"https://www.okx.com/api/v5/market/ticker", params={"instId": okx_sym}, timeout=3)
         if r.status_code == 200: return float(r.json()["data"][0]["last"])
     except Exception: pass
+    
+    # Добавляем MEXC для GRAM
+    try:
+        mexc_sym = "GRAMUSDT" if symbol == "TONUSDT" else symbol
+        r = await get_client().get(f"https://api.mexc.com/api/v3/ticker/price", params={"symbol": mexc_sym}, timeout=3)
+        if r.status_code == 200: return float(r.json()["price"])
+    except Exception: pass
+    
     raise Exception("Все биржи недоступны или монета не найдена")
 
 async def get_funding(symbol: str) -> dict:
@@ -183,7 +190,6 @@ def get_back_menu():
 
 HELP_TEXT = (
     "криптопенис эрегирует!\n\n"
-    "ФУЛЛ ИНСТРУКЦИЯ\n\n"
     "Цены:\n"
     "/price BTC — цена любой монеты\n"
     "(Кнопки ниже показывают цены в 1 клик)\n\n"
