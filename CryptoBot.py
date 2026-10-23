@@ -33,7 +33,7 @@ dp = Dispatcher()
 DB_PATH = "alerts.db"
 
 _client = None
-ws_task = None  # Глобальная переменная для WebSocket
+ws_task = None
 
 def get_client():
     global _client
@@ -217,7 +217,7 @@ async def ws_stream_gate(symbol: str, chat_id: int):
                 "payload": [gate_sym]
             }
             await websocket.send(json.dumps(subscribe_msg))
-            await bot.send_message(chat_id, f"🟢 WebSocket подключен! Трансляция {symbol} (Gate.io) запущена. Чтобы остановить: /stop_ws")
+            await bot.send_message(chat_id, f"WebSocket подключен! Трансляция {symbol} (Gate.io) запущена. Чтобы остановить: /stop_ws")
 
             while True:
                 response = await websocket.recv()
@@ -228,13 +228,13 @@ async def ws_stream_gate(symbol: str, chat_id: int):
                     price = float(result["last"])
                     funding = float(result["funding_rate"]) * 100
                     
-                    await bot.send_message(chat_id, f"📊 {symbol}: Цена {price} | Фандинг: {funding:.4f}%")
+                    await bot.send_message(chat_id, f"{symbol}: Цена {price} | Фандинг: {funding:.4f}%")
                     await asyncio.sleep(5)
                     
     except asyncio.CancelledError:
-        await bot.send_message(chat_id, f"🔴 WebSocket для {symbol} остановлен.")
+        await bot.send_message(chat_id, f"WebSocket для {symbol} остановлен.")
     except Exception as e:
-        await bot.send_message(chat_id, f"❌ WebSocket отключился: {e}")
+        await bot.send_message(chat_id, f"WebSocket отключился: {e}")
 
 # --- БАЗА ДАННЫХ ---
 SCHEMA = """
@@ -528,7 +528,7 @@ async def checker_loop():
                         except: pass
 
                     if notify:
-                        await bot.send_message(t["user_id"], f"📈 {t['symbol']}: {curr_price} (шаг: {step})")
+                        await bot.send_message(t["user_id"], f"{t['symbol']}: {curr_price} (шаг: {step})")
                         await update_tracker_last(t["id"], curr_price)
                 except Exception as e: log.warning("Tracker %s failed: %s", t["id"], e)
                 
