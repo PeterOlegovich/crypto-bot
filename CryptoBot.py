@@ -23,7 +23,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден в переменных окружения!")
 
-ADMIN_ID = 952525147  # Твой ID
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 CHECK_INTERVAL = 10
 # ==========================================
 
