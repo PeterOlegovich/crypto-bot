@@ -21,6 +21,7 @@ if not BOT_TOKEN:
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 CHECK_INTERVAL = 10
+SCAN_INTERVAL = 300  # Сканер проверяет рынок каждые 5 минут (300 секунд)
 # ==========================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -31,6 +32,9 @@ dp = Dispatcher()
 DB_PATH = "alerts.db"
 
 _client = None
+# Переменные для Сканера
+SCAN_ACTIVE = False
+SCAN_THRESHOLD = 5.0
 
 def get_client():
     global _client
@@ -242,6 +246,13 @@ def price_menu():
 def back_menu():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Назад", callback_data="back_to_help")]])
 
+def scan_menu():
+    kb = [
+        [InlineKeyboardButton(text="5%", callback_data="scan_5"), InlineKeyboardButton(text="10%", callback_data="scan_10")],
+        [InlineKeyboardButton(text="15%", callback_data="scan_15"), InlineKeyboardButton(text="20%", callback_data="scan_20")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
 HELP_TEXT = (
     "криптопенис эрегирует!\n\n"
     "Цены:\n"
@@ -260,6 +271,9 @@ HELP_TEXT = (
     "Шаги: 10s (мин. слежка - каждые 10 сек), 1m (1 мин), 1h (1 час), 5% (5%), 100 (на 100)\n"
     "/trackers — список трекеров\n"
     "/deltrack 1 — удалить трекер\n\n"
+    "Сканер Пампов (Поиск движух):\n"
+    "/scan — запустить сканер мемкоинов\n"
+    "/stop_scan — остановить сканер\n\n"
     "Узнать цену:"
 )
 
@@ -280,6 +294,45 @@ dp.callback_query.middleware(UserMiddleware())
 async def cmd_start(m: Message):
     await m.answer(HELP_TEXT, reply_markup=price_menu())
 
+@dp.message(Command("scan"))
+async def cmd_scan(m: Message):
+    await m.answer("Выбери процент изменения, при котором бот начнет присылать сигналы:", reply_markup=scan_menu())
+
+@dp.callback_query(F.data.startswith("scan_"))
+async def callback_scan(c: CallbackQuery):
+    global SCAN_ACTIVE, SCAN_THRESHOLD
+    threshold = float(c.data.split("_")[1])
+    SCAN_THRESHOLD = threshold
+    SCAN_ACTIVE = True
+    await c.message.edit_text(f"Сканер запущен!\nЯ буду присылать монеты, которые изменились на {threshold}% и более.\n(Проверяю каждые 5 минут)\n\nЧтобы остановить, напиши /stop_scan")
+    await c.answer()
+
+@dp.message(Command("stop_scan"))
+async def cmd_stop_scan(m: Message):
+    global SCAN_ACTIVE
+    if SCAN_ACTIVE:
+        SCAN_ACTIVE = False
+        await m.answer("Сканер остановлен. Больше не буду присылать пампы.")
+    else:
+        await m.answer("Сканер уже выключен.")
+
+@dp.callback_query(F.data.startswith("price_"))
+async def callback_price(c: CallbackQuery):
+    sym_name = c.data.split("_")[1]
+    sym = "PAXGUSDT" if sym_name == "GOLD" else ("TONUSDT" if sym_name == "GRAM" else f"{sym_name}USDT")
+    try:
+        p = await get_price(sym)
+        await c.message.edit_text(f"{sym_name}: {p}", reply_markup=back_menu())
+    except Exception as e:
+        await c.message.edit_text(f"Ошибка: {e}", reply_markup=back_menu())
+    await c.answer()
+
+@dp.callback_query(F.data == "back_to_help")
+async def callback_back(c: CallbackQuery):
+    await c.message.edit_text(HELP_TEXT, reply_markup=price_menu())
+    await c.answer()
+
+# --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def cmd_admin(m: Message):
     if m.from_user.id != ADMIN_ID: return
@@ -337,23 +390,7 @@ async def cmd_errors(m: Message):
         text += f"{r[1]}: {r[0]}\n"
     await m.answer(text)
 
-# --- КОЛБЭКИ ---
-@dp.callback_query(F.data.startswith("price_"))
-async def callback_price(c: CallbackQuery):
-    sym_name = c.data.split("_")[1]
-    sym = "PAXGUSDT" if sym_name == "GOLD" else ("TONUSDT" if sym_name == "GRAM" else f"{sym_name}USDT")
-    try:
-        p = await get_price(sym)
-        await c.message.edit_text(f"{sym_name}: {p}", reply_markup=back_menu())
-    except Exception as e:
-        await c.message.edit_text(f"Ошибка: {e}", reply_markup=back_menu())
-    await c.answer()
-
-@dp.callback_query(F.data == "back_to_help")
-async def callback_back(c: CallbackQuery):
-    await c.message.edit_text(HELP_TEXT, reply_markup=price_menu())
-    await c.answer()
-
+# --- ОСТАЛЬНЫЕ КОМАНДЫ ---
 @dp.message(Command("price"))
 async def cmd_price(m: Message):
     parts = m.text.split()
@@ -430,7 +467,7 @@ async def cmd_deltrack(m: Message):
     await reset_db_ids()
     await m.answer(f"Трекер #{parts[1]} удален", reply_markup=back_menu())
 
-# --- ФОНОВЫЙ ЦИКЛ ---
+# --- ФОНОВЫЕ ЦИКЛЫ ---
 async def checker_loop():
     log.info("Checker loop started")
     while True:
@@ -474,6 +511,32 @@ async def checker_loop():
             await log_error_to_db(f"checker_loop failed")
         await asyncio.sleep(CHECK_INTERVAL)
 
+async def pump_scanner_loop():
+    global SCAN_ACTIVE, SCAN_THRESHOLD
+    log.info("Pump Scanner started")
+    while True:
+        await asyncio.sleep(SCAN_INTERVAL)
+        if not SCAN_ACTIVE: continue
+        
+        try:
+            r = await get_client().get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=15)
+            if r.status_code == 200:
+                tickers = r.json()["result"]["list"]
+                found_pumps = []
+                
+                for t in tickers:
+                    if not t["symbol"].endswith("USDT"): continue
+                    change_pct = float(t["price24hPcnt"]) * 100
+                    if abs(change_pct) >= SCAN_THRESHOLD:
+                        direction = "выросла" if change_pct > 0 else "упала"
+                        found_pumps.append(f"{t['symbol']}: {direction} на {abs(change_pct):.1f}% (Цена: {t['lastPrice']}) [Bybit]")
+                
+                if found_pumps:
+                    text = f"Сканер: Найдены движения на {SCAN_THRESHOLD}%+!\n\n" + "\n".join(found_pumps[:15])
+                    await bot.send_message(ADMIN_ID, text)
+        except Exception as e:
+            await log_error_to_db(f"Scanner failed: {e}")
+
 # --- ЗАПУСК ---
 async def handle_ping(request):
     return web.Response(text="Bot is alive!")
@@ -490,6 +553,7 @@ async def main():
     await init_db()
     asyncio.create_task(checker_loop())
     asyncio.create_task(start_dummy_server())
+    asyncio.create_task(pump_scanner_loop()) # <--- ЗАПУСК СКАНЕРА
     try: await dp.start_polling(bot)
     finally: await close_client(); await bot.session.close()
 
