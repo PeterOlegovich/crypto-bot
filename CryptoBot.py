@@ -173,7 +173,11 @@ async def add_alert(user_id, kind, symbol, op, threshold) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("INSERT INTO alerts (user_id, kind, symbol, op, threshold) VALUES (?, ?, ?, ?, ?)", (user_id, kind, symbol, op, threshold))
         await db.commit()
-        return cur.lastrowid
+        
+        # --- ИЗМЕНЕНИЕ: Считаем номер алерта ТОЛЬКО для этого пользователя ---
+        cur_count = await db.execute("SELECT COUNT(*) FROM alerts WHERE user_id = ?", (user_id,))
+        row = await cur_count.fetchone()
+        return row[0] # Возвращаем локальный номер
 
 async def get_active_alerts(user_id=None):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -192,7 +196,11 @@ async def add_tracker(user_id, symbol, base_price, step) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("INSERT INTO trackers (user_id, symbol, base_price, step, last_notified) VALUES (?, ?, ?, ?, ?)", (user_id, symbol, base_price, step, base_price))
         await db.commit()
-        return cur.lastrowid
+        
+        # --- ИЗМЕНЕНИЕ: Считаем номер трекера ТОЛЬКО для этого пользователя ---
+        cur_count = await db.execute("SELECT COUNT(*) FROM trackers WHERE user_id = ?", (user_id,))
+        row = await cur_count.fetchone()
+        return row[0]
 
 async def get_trackers(user_id=None):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -327,7 +335,6 @@ async def callback_scan(c: CallbackQuery):
     await c.message.edit_text("Запускаю сканер... Запоминаю текущие цены.")
     
     try:
-        # Пытаемся взять с Bybit
         r = await get_client().get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=15)
         if r.status_code == 200:
             START_PRICES = {t["symbol"]: float(t["lastPrice"]) for t in r.json()["result"]["list"]}
@@ -337,7 +344,6 @@ async def callback_scan(c: CallbackQuery):
         await c.message.edit_text(f"Сканер запущен (Bybit)!\nЯ запомнил текущие цены всех монет.\nЕсли что-то изменится на {threshold}% от этих цен, я сразу пришлю.\n(Проверяю каждую минуту)\n\nЧтобы остановить, напиши /stop_scan")
     
     except Exception:
-        # Если Bybit заблокировал, берем с Gate.io
         try:
             r = await get_client().get("https://api.gateio.ws/api/v4/futures/usdt/tickers", timeout=15)
             if r.status_code == 200:
@@ -564,7 +570,6 @@ async def pump_scanner_loop():
         source_name = ""
         
         try:
-            # Пытаемся обновить с Bybit
             r = await get_client().get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=15)
             if r.status_code == 200:
                 current_tickers = {t["symbol"]: float(t["lastPrice"]) for t in r.json()["result"]["list"]}
@@ -574,7 +579,6 @@ async def pump_scanner_loop():
             
         if not current_tickers:
             try:
-                # Если Bybit не ответил, берем с Gate.io
                 r = await get_client().get("https://api.gateio.ws/api/v4/futures/usdt/tickers", timeout=15)
                 if r.status_code == 200:
                     current_tickers = {t["contract"].replace("_", ""): float(t["last"]) for t in r.json()}
@@ -620,7 +624,9 @@ async def start_dummy_server():
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    # --- ИЗМЕНЕНИЕ: Render выдает порт через переменную окружения PORT ---
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
 async def main():
